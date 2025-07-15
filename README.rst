@@ -45,7 +45,7 @@ Installation
 
 Requirements:
 
-* Python 3.6 or higher;
+* Python 3.8 or higher;
 * A running TWS or IB Gateway application (version 1023 or higher).
   Make sure the
   `API port is enabled <https://interactivebrokers.github.io/tws-api/initial_setup.html>`_
