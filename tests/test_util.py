@@ -156,7 +156,7 @@ class TestTimeUtilities:
         assert result.hour == 10
         assert result.minute == 30
         assert result.second == 0
-        assert result.tzinfo == util.ZoneInfo("US/Eastern")
+        assert result.tzinfo == util.getZoneInfo("US/Eastern")
 
     def test_parse_ib_datetime_without_timezone(self):
         """Test parsing IB datetime without timezone."""

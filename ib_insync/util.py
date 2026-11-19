@@ -14,9 +14,36 @@ from typing import (
 import eventkit as ev
 
 try:
-    from zoneinfo import ZoneInfo
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 except ImportError:
-    from backports.zoneinfo import ZoneInfo  # type: ignore
+    from backports.zoneinfo import (  # type: ignore
+        ZoneInfo, ZoneInfoNotFoundError)
+
+
+_LEGACY_TZ_ALIASES = {
+    'US/Eastern': 'America/New_York',
+    'US/Central': 'America/Chicago',
+    'US/Mountain': 'America/Denver',
+    'US/Pacific': 'America/Los_Angeles',
+    'US/Alaska': 'America/Anchorage',
+    'US/Hawaii': 'Pacific/Honolulu',
+    'MET': 'Europe/Berlin',
+    'EST': 'America/New_York',
+    'CST': 'America/Chicago',
+    'MST': 'America/Denver',
+    'PST': 'America/Los_Angeles',
+}
+
+
+def getZoneInfo(key: str) -> ZoneInfo:
+    """Resolve an IANA or legacy IB timezone name to a ZoneInfo instance."""
+    try:
+        return ZoneInfo(key)
+    except ZoneInfoNotFoundError:
+        alias = _LEGACY_TZ_ALIASES.get(key)
+        if alias:
+            return ZoneInfo(alias)
+        raise
 
 
 globalErrorEvent = ev.Event()
@@ -557,12 +584,12 @@ def parseIBDatetime(s: str) -> Union[dt.date, dt.datetime]:
             s0, s1, s2 = parts
             ss = (s0 + s1).replace('-', '')[:16]
             t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
-            t = t.replace(tzinfo=ZoneInfo(s2))
+            t = t.replace(tzinfo=getZoneInfo(s2))
         elif len(parts) == 2 and ':' in parts[0]:
             # 20220101-10:30:00 US/Eastern
             ss = parts[0].replace('-', '')[:16]
             t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
-            t = t.replace(tzinfo=ZoneInfo(parts[1]))
+            t = t.replace(tzinfo=getZoneInfo(parts[1]))
         else:
             # YYYYmmdd  HH:MM:SS
             # or YYYYmmdd-HH:MM:SS

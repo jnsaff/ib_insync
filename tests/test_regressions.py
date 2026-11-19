@@ -640,14 +640,26 @@ class TestUtilRegressions:
         assert 'e+' in util.formatSI(1e30)
 
     def test_parse_ib_datetime_preserves_timezone_variants(self):
-        tz_ams = util.ZoneInfo('Europe/Amsterdam')
-        tz_ny = util.ZoneInfo('US/Eastern')
+        tz_ams = util.getZoneInfo('Europe/Amsterdam')
+        tz_ny = util.getZoneInfo('US/Eastern')
 
         r1 = util.parseIBDatetime('20221125  10:00:00 Europe/Amsterdam')
         assert r1 == dt.datetime(2022, 11, 25, 10, 0, tzinfo=tz_ams)
 
         r2 = util.parseIBDatetime('20220101-10:30:00 US/Eastern')
         assert r2 == dt.datetime(2022, 1, 1, 10, 30, tzinfo=tz_ny)
+
+    def test_get_zone_info_legacy_alias_fallback(self):
+        real_zoneinfo = util.ZoneInfo
+
+        def missing_legacy(key):
+            if key == 'US/Eastern':
+                raise util.ZoneInfoNotFoundError(key)
+            return real_zoneinfo(key)
+
+        with patch('ib_insync.util.ZoneInfo', side_effect=missing_legacy):
+            tz = util.getZoneInfo('US/Eastern')
+        assert tz == real_zoneinfo('America/New_York')
 
     def test_tree_json_serializable_for_none_and_bytes(self):
         data = util.tree({'a': None, 'b': b'hello'})

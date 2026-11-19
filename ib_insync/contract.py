@@ -529,7 +529,7 @@ class ContractDetails:
     def _parseSessions(self, s: str) -> List[TradingSession]:
         if not s:
             return []
-        tz = util.ZoneInfo(self.timeZoneId)
+        tz = util.getZoneInfo(self.timeZoneId)
         sessions = []
         for sess in s.split(';'):
             if not sess or 'CLOSED' in sess:

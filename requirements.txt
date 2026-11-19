@@ -1,4 +1,5 @@
 eventkit
 nest_asyncio
+tzdata
 dataclasses;python_version<"3.7"
 backports.zoneinfo;python_version<"3.9"
