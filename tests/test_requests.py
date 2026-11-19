@@ -2,7 +2,10 @@ import pytest
 
 import ib_insync as ibi
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio(loop_scope='session'),
+    pytest.mark.integration,
+]
 
 
 async def test_request_error_raised(ib):
