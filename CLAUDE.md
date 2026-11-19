@@ -8,13 +8,19 @@ IB-insync is a Python library that provides a sync/async framework for the Inter
 
 ## Development Commands
 
+### Installation
+```bash
+# Editable install with development tools (Python 3.13+)
+pip install -e ".[dev]"
+```
+
 ### Testing
 ```bash
-# Run all tests (requires a running TWS/IBG connection)
-pytest
+# Run unit tests (no live TWS/IBG required)
+pytest -W error
 
-# Run tests with asyncio support
-pytest --asyncio-mode=auto
+# Run live TWS/IBG integration tests
+pytest -m integration
 ```
 
 ### Code Quality
@@ -28,18 +34,15 @@ mypy -p ib_insync
 
 ### Documentation
 ```bash
-# Build documentation
+# Build documentation (requires docs extra: pip install -e ".[docs]")
 cd docs
 make html
-
-# Or use the distribution script which includes docs
-./dist.sh
 ```
 
-### Package Distribution
+### Package Build
 ```bash
-# Build and upload package (via dist.sh)
-./dist.sh
+# Build source distribution and wheel via PEP 517
+python -m build
 ```
 
 ## Code Architecture
@@ -65,29 +68,28 @@ make html
 ### Key Design Patterns
 
 - **Async/Sync Duality**: Methods come in both blocking and async versions (e.g., `connect()` vs `connectAsync()`)
-- **Event-Driven**: Uses `eventkit` for event handling and state updates
+- **Event-Driven**: Uses `eventkit` (provided by `aeventkit`) for event handling and state updates
 - **Dataclasses**: Extensive use of dataclasses for API objects with helper methods for dict/tuple conversion
 - **State Synchronization**: Automatic state management that keeps local objects in sync with TWS/IBG
 
 ### Testing Architecture
 
-- Uses pytest with asyncio support
-- Tests require a running TWS/IBG connection
-- Session-scoped fixtures for event loop and IB connection
+- Uses pytest with `pytest-asyncio`
+- Unit tests run offline by default (`addopts = '-m "not integration"'` in `pyproject.toml`)
+- Live TWS/IBG tests are marked `@pytest.mark.integration`
 - Located in `tests/` directory
 
 ## Configuration Files
 
-- `setup.cfg`: Flake8 configuration ignoring specific docstring and formatting rules
-- `mypy.ini`: MyPy configuration with imports ignored and untyped defs checking
-- `requirements-dev.txt`: Development dependencies (pytest, pytest-asyncio)
+- `pyproject.toml`: PEP 621 package metadata, dependencies, pytest, and MyPy configuration
+- `.flake8`: Flake8 configuration ignoring specific docstring and formatting rules
+- `requirements.txt` / `requirements-dev.txt`: Runtime and development dependency lists
 
 ## Key Dependencies
 
-- `eventkit`: Event handling framework
-- `nest_asyncio`: Asyncio nesting support
-- `dataclasses`: For Python < 3.7 compatibility
-- `backports.zoneinfo`: For Python < 3.9 timezone support
+- `aeventkit`: Maintained `eventkit` fork providing event handling (`import eventkit`) for Python 3.13+
+- `anest-asyncio`: Maintained `nest_asyncio` fork (`import nest_asyncio`) for Python 3.13–3.15+
+- `tzdata`: Bundled IANA timezone database for `zoneinfo`
 
 <!-- BACKLOG.MD GUIDELINES START -->
 # Instructions for the usage of Backlog.md CLI Tool

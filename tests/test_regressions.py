@@ -743,7 +743,8 @@ class TestControllerAndFlexRegressions:
         send_resp = (
             b'<FlexStatementResponse><Status>Success</Status>'
             b'<ReferenceCode>123</ReferenceCode>'
-            b'<Url>https://example.com/get</Url></FlexStatementResponse>'
+            b'<Url>https://gdcdyn.interactivebrokers.com/Universal/servlet/'
+            b'FlexStatementService.GetStatement</Url></FlexStatementResponse>'
         )
         progress_resp = (
             b'<FlexStatementResponse>'
