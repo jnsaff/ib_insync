@@ -83,6 +83,7 @@ class Client:
 
     MaxRequests = 45
     RequestsInterval = 1
+    MaxMsgLen = 0xFFFFFF
 
     MinClientVersion = 157
     MaxClientVersion = 178
@@ -342,7 +343,15 @@ class Client:
             if len(self._data) <= 4:
                 break
             # 4 byte prefix tells the message length
-            msgEnd = 4 + struct.unpack('>I', self._data[:4])[0]
+            msgLen = struct.unpack('>I', self._data[:4])[0]
+            if msgLen > self.MaxMsgLen:
+                self._data = b''
+                self.conn.disconnect()
+                self._onSocketDisconnected(
+                    f'Incoming message length {msgLen} exceeds maximum '
+                    f'{self.MaxMsgLen} bytes')
+                return
+            msgEnd = 4 + msgLen
             if len(self._data) < msgEnd:
                 # insufficient data for now
                 break
@@ -360,7 +369,13 @@ class Client:
             if not self._serverVersion and len(fields) == 2:
                 # this concludes the handshake
                 version, _connTime = fields
-                self._serverVersion = int(version)
+                try:
+                    self._serverVersion = int(version)
+                except ValueError:
+                    self.conn.disconnect()
+                    self._onSocketDisconnected(
+                        f'Invalid TWS/gateway handshake response: {version!r}')
+                    return
                 if self._serverVersion < self.MinClientVersion:
                     self.conn.disconnect()
                     self._onSocketDisconnected(
@@ -377,14 +392,19 @@ class Client:
                 if not self._apiReady:
                     # snoop for nextValidId and managedAccounts response,
                     # when both are in then the client is ready
-                    msgId = int(fields[0])
-                    if msgId == 9:
-                        _, _, validId = fields
-                        self.updateReqId(int(validId))
-                        self._hasReqId = True
-                    elif msgId == 15:
-                        _, _, accts = fields
-                        self._accounts = [a for a in accts.split(',') if a]
+                    try:
+                        msgId = int(fields[0])
+                        if msgId == 9:
+                            _, _, validId = fields
+                            self.updateReqId(int(validId))
+                            self._hasReqId = True
+                        elif msgId == 15:
+                            _, _, accts = fields
+                            self._accounts = [
+                                a for a in accts.split(',') if a]
+                    except (ValueError, IndexError):
+                        self._logger.warning(
+                            'Malformed pre-ready message: %s', fields)
                     if self._hasReqId and self._accounts:
                         self._apiReady = True
                         self.apiStart.emit()

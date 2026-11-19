@@ -179,6 +179,13 @@ class Decoder:
         def handler(fields):
             method = getattr(self.wrapper, methodName, None)
             if method:
+                expected = skip + len(types)
+                if len(fields) < expected:
+                    self.logger.error(
+                        'Truncated %s message: expected at least %d fields, '
+                        'got %d: %s',
+                        methodName, expected, len(fields), fields)
+                    return
                 try:
                     args = [
                         field if typ is str else
@@ -194,9 +201,21 @@ class Decoder:
 
     def interpret(self, fields):
         """Decode fields and invoke corresponding wrapper method."""
+        if not fields:
+            self.logger.warning('Received empty message fields')
+            return
         try:
             msgId = int(fields[0])
-            handler = self.handlers[msgId]
+        except (ValueError, TypeError):
+            self.logger.error(
+                'Invalid non-integer message id %r in fields: %s',
+                fields[0], fields)
+            return
+        handler = self.handlers.get(msgId)
+        if handler is None:
+            self.logger.warning('Unknown message id %d: %s', msgId, fields)
+            return
+        try:
             handler(fields)
         except Exception:
             self.logger.exception(f'Error handling fields: {fields}')
@@ -210,17 +229,25 @@ class Decoder:
             v = getattr(obj, field.name)
             if not isinstance(v, str):
                 continue
-            if typ is int:
-                setattr(obj, field.name, int(v) if v else field.default)
-            elif typ is float:
-                if not v:
-                    setattr(obj, field.name, field.default)
-                elif v == 'Infinite':
-                    setattr(obj, field.name, math.inf)
-                else:
-                    setattr(obj, field.name, float(v))
-            elif typ is bool:
-                setattr(obj, field.name, bool(int(v)) if v else field.default)
+            try:
+                if typ is int:
+                    setattr(obj, field.name, int(v) if v else field.default)
+                elif typ is float:
+                    if not v:
+                        setattr(obj, field.name, field.default)
+                    elif v == 'Infinite':
+                        setattr(obj, field.name, math.inf)
+                    else:
+                        setattr(obj, field.name, float(v))
+                elif typ is bool:
+                    setattr(
+                        obj, field.name, bool(int(v)) if v else field.default)
+            except ValueError:
+                self.logger.warning(
+                    'Invalid %s value %r for %s.%s; using default %r',
+                    typ.__name__, v, obj.__class__.__name__, field.name,
+                    field.default)
+                setattr(obj, field.name, field.default)
 
     def priceSizeTick(self, fields):
         _, _, reqId, tickType, price, size, attrib = fields

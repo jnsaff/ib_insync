@@ -286,7 +286,10 @@ class Forex(Contract):
             currency: Quote currency.
         """
         if pair:
-            assert len(pair) == 6
+            if not isinstance(pair, str) or len(pair) != 6:
+                raise ValueError(
+                    'Forex pair must be a 6-character string like '
+                    f'"EURUSD", got {pair!r}')
             symbol = symbol or pair[:3]
             currency = currency or pair[3:]
         Contract.__init__(

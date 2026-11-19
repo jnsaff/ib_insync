@@ -446,7 +446,7 @@ class TestIBRegressions:
             orderStatus=OrderStatus(orderId=5, status=OrderStatus.Filled),
         )
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match='Cannot modify order'):
             ib.placeOrder(contract, order)
         client.placeOrder.assert_not_called()
 
