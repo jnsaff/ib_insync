@@ -5,7 +5,9 @@ import copy
 import datetime
 import logging
 import time
-from typing import Awaitable, Dict, Iterator, List, Optional, Union
+from contextlib import asynccontextmanager
+from typing import (
+    AsyncIterator, Awaitable, Dict, Iterator, List, Optional, Union)
 
 from eventkit import Event
 
@@ -249,6 +251,35 @@ class IB:
     def __exit__(self, *_exc):
         self.disconnect()
 
+    async def __aenter__(self) -> 'IB':
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        self.disconnect()
+
+    @asynccontextmanager
+    async def connectContext(
+            self, host: str = '127.0.0.1', port: int = 7497,
+            clientId: int = 1, timeout: Optional[float] = 4,
+            readonly: bool = False, account: str = '',
+            raiseSyncErrors: bool = False) -> AsyncIterator['IB']:
+        """
+        Async context manager that connects to TWS/IBG on entry and
+        guarantees :meth:`.disconnect` on exit.
+
+        Example::
+
+            async with IB().connectContext('127.0.0.1', 7497) as ib:
+                positions = ib.positions()
+        """
+        await self.connectAsync(
+            host, port, clientId, timeout, readonly, account,
+            raiseSyncErrors)
+        try:
+            yield self
+        finally:
+            self.disconnect()
+
     def __repr__(self):
         conn = (f'connected to {self.client.host}:'
                 f'{self.client.port} clientId={self.client.clientId}' if
@@ -355,6 +386,8 @@ class IB:
         Returns:
             ``True`` if not timed-out, ``False`` otherwise.
         """
+        if isinstance(timeout, bool) or timeout < 0:
+            raise ValueError(f'timeout must be non-negative, got {timeout!r}')
         if timeout:
             try:
                 util.run(asyncio.wait_for(self.updateEvent, timeout))
@@ -376,6 +409,8 @@ class IB:
             timeout: Maximum time in seconds to wait.
                 If 0 then no timeout is used.
         """
+        if isinstance(timeout, bool) or timeout < 0:
+            raise ValueError(f'timeout must be non-negative, got {timeout!r}')
         endTime = time.monotonic() + timeout
         while True:
             test = condition and condition()
@@ -620,7 +655,11 @@ class IB:
             takeProfitPrice: Limit price of profit order.
             stopLossPrice: Stop price of loss order.
         """
-        assert action in ('BUY', 'SELL')
+        if action not in ('BUY', 'SELL'):
+            raise ValueError(
+                f"action must be 'BUY' or 'SELL', got {action!r}")
+        if isinstance(quantity, bool) or quantity <= 0:
+            raise ValueError(f'quantity must be positive, got {quantity!r}')
         reverseAction = 'BUY' if action == 'SELL' else 'SELL'
         parent = LimitOrder(
             action, quantity, limitPrice,
@@ -680,6 +719,12 @@ class IB:
             contract: Contract to use for order.
             order: The order to be placed.
         """
+        if not isinstance(contract, Contract):
+            raise TypeError(
+                f'contract must be a Contract, got {type(contract).__name__}')
+        if not isinstance(order, Order):
+            raise TypeError(
+                f'order must be an Order, got {type(order).__name__}')
         orderId = order.orderId or self.client.getReqId()
         now = datetime.datetime.now(datetime.timezone.utc)
         key = self.wrapper.orderKey(
@@ -687,7 +732,10 @@ class IB:
         trade = self.wrapper.trades.get(key)
         if trade:
             # this is a modification of an existing order
-            assert trade.orderStatus.status not in OrderStatus.DoneStates
+            if trade.orderStatus.status in OrderStatus.DoneStates:
+                raise ValueError(
+                    f'Cannot modify order {orderId} in done state '
+                    f'{trade.orderStatus.status!r}')
             self.client.placeOrder(orderId, contract, order)
             logEntry = TradeLogEntry(now, trade.orderStatus.status, 'Modify')
             trade.log.append(logEntry)
@@ -717,6 +765,9 @@ class IB:
             order: The order to be canceled.
             manualCancelOrderTime: For audit trail.
         """
+        if not isinstance(order, Order):
+            raise TypeError(
+                f'order must be an Order, got {type(order).__name__}')
         self.client.cancelOrder(order.orderId, manualCancelOrderTime)
         now = datetime.datetime.now(datetime.timezone.utc)
         key = self.wrapper.orderKey(
@@ -886,8 +937,14 @@ class IB:
             account: Subscribe to this account.
             modelCode: If specified, filter for this account model.
         """
+        if not isinstance(account, str) or not account.strip():
+            raise ValueError(
+                f'account must be a non-empty string, got {account!r}')
         key = (account, modelCode)
-        assert key not in self.wrapper.pnlKey2ReqId
+        if key in self.wrapper.pnlKey2ReqId:
+            raise ValueError(
+                f'PnL subscription already active for account {account!r}, '
+                f'modelCode {modelCode!r}')
         reqId = self.client.getReqId()
         self.wrapper.pnlKey2ReqId[key] = reqId
         pnl = PnL(account, modelCode)
@@ -928,8 +985,17 @@ class IB:
             modelCode: Filter for this account model.
             conId: Filter for this contract ID.
         """
+        if not isinstance(account, str) or not account.strip():
+            raise ValueError(
+                f'account must be a non-empty string, got {account!r}')
+        if isinstance(conId, bool) or not isinstance(conId, int) or conId <= 0:
+            raise ValueError(
+                f'conId must be a positive integer, got {conId!r}')
         key = (account, modelCode, conId)
-        assert key not in self.wrapper.pnlSingleKey2ReqId
+        if key in self.wrapper.pnlSingleKey2ReqId:
+            raise ValueError(
+                f'PnLSingle subscription already active for account '
+                f'{account!r}, modelCode {modelCode!r}, conId {conId}')
         reqId = self.client.getReqId()
         self.wrapper.pnlSingleKey2ReqId[key] = reqId
         pnlSingle = PnLSingle(account, modelCode, conId)
@@ -1805,7 +1871,14 @@ class IB:
             clientId: int = 1, timeout: Optional[float] = 4,
             readonly: bool = False, account: str = '',
             raiseSyncErrors: bool = False):
+        if isinstance(clientId, bool):
+            raise ValueError(f'Invalid clientId: {clientId!r}')
         clientId = int(clientId)
+        if clientId < 0:
+            raise ValueError(f'clientId must be non-negative, got {clientId}')
+        if timeout is not None and (isinstance(timeout, bool) or timeout < 0):
+            raise ValueError(
+                f'timeout must be None or non-negative, got {timeout!r}')
         self.wrapper.clientId = clientId
         timeout = timeout or None
         try:
@@ -1857,6 +1930,10 @@ class IB:
                 msg = 'executions request timed out'
                 errors.append(msg)
                 self._logger.error(msg)
+            except Exception as exc:
+                msg = f'executions request failed: {exc!r}'
+                errors.append(msg)
+                self._logger.error(msg)
 
             if raiseSyncErrors and len(errors) > 0:
                 raise ConnectionError(errors)
@@ -1888,7 +1965,10 @@ class IB:
                     f'possibles are {possibles}')
             else:
                 c = detailsList[0].contract
-                assert c
+                if c is None:
+                    self._logger.warning(
+                        f'Contract details missing contract for: {contract}')
+                    continue
                 if contract.exchange == 'SMART':
                     # overwriting 'SMART' exchange can create invalid contract
                     c.exchange = contract.exchange

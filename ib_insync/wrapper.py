@@ -271,6 +271,8 @@ class Wrapper:
         return key
 
     def setTimeout(self, timeout: float):
+        if isinstance(timeout, bool) or timeout < 0:
+            raise ValueError(f'timeout must be non-negative, got {timeout!r}')
         if self._timeoutHandle:
             self._timeoutHandle.cancel()
         self._timeoutHandle = None
@@ -290,7 +292,9 @@ class Wrapper:
             loop = getLoop()
             self._timeoutHandle = loop.call_later(delay, self._setTimer)
         else:
-            self._logger.debug('Timeout')
+            self._logger.warning(
+                'Connection idle timeout: no data received for %.2fs '
+                '(limit=%.2fs)', diff, self._timeout)
             self.setTimeout(0)
             self.ib.timeoutEvent.emit(diff)
 

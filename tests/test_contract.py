@@ -467,7 +467,7 @@ class TestContractValidation:
         assert gbp_jpy.currency == 'JPY'
         
         # Test non-standard length
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match='6-character'):
             Forex('INVALID')
 
     def test_contract_serialization(self):

@@ -87,6 +87,23 @@ Output::
     705 2020-01-02 14:00:00  1.119325  1.119675  1.119075  1.119225      -1
 
 
+Async Context Manager Example:
+
+.. code-block:: python
+
+    import asyncio
+    from ib_insync import IB, Forex
+
+    async def main():
+        async with IB().connectContext('127.0.0.1', 7497, clientId=1) as ib:
+            bars = await ib.reqHistoricalDataAsync(
+                Forex('EURUSD'), endDateTime='', durationStr='1 D',
+                barSizeSetting='1 hour', whatToShow='MIDPOINT', useRTH=True)
+            print(len(bars))
+
+    asyncio.run(main())
+
+
 Documentation
 -------------
 

@@ -334,6 +334,9 @@ def run(*awaitables: Awaitable, timeout: Optional[float] = None):
     asyncio.TimeoutError if the awaitables are not ready within the
     timeout period.
     """
+    if timeout is not None and (isinstance(timeout, bool) or timeout < 0):
+        raise ValueError(
+            f'timeout must be None or non-negative, got {timeout!r}')
     loop = getLoop()
     if not awaitables:
         if loop.is_running():
@@ -412,6 +415,8 @@ def sleep(secs: float = 0.02) -> bool:
     Args:
         secs (float): Time in seconds to wait.
     """
+    if isinstance(secs, bool) or secs < 0:
+        raise ValueError(f'secs must be non-negative, got {secs!r}')
     run(asyncio.sleep(secs))
     return True
 
@@ -429,7 +434,8 @@ def timeRange(start: Time_t, end: Time_t, step: float) \
             or as datetime.time in which case today is used as the date
         step (float): The number of seconds of each period
     """
-    assert step > 0
+    if isinstance(step, bool) or step <= 0:
+        raise ValueError(f'step must be a positive number, got {step!r}')
     delta = dt.timedelta(seconds=step)
     t = _fillDate(start)
     endDt = _fillDate(end)
@@ -463,7 +469,8 @@ async def timeRangeAsync(
         end: Time_t,
         step: float) -> AsyncIterator[dt.datetime]:
     """Async version of :meth:`timeRange`."""
-    assert step > 0
+    if isinstance(step, bool) or step <= 0:
+        raise ValueError(f'step must be a positive number, got {step!r}')
     delta = dt.timedelta(seconds=step)
     t = _fillDate(start)
     endDt = _fillDate(end)
@@ -581,32 +588,41 @@ def formatIBDatetime(t: Union[dt.date, dt.datetime, str, None]) -> str:
 
 def parseIBDatetime(s: str) -> Union[dt.date, dt.datetime]:
     """Parse string in IB date or datetime format to datetime."""
-    if len(s) == 8 and s.isdigit():
-        # YYYYmmdd
-        y = int(s[0:4])
-        m = int(s[4:6])
-        d = int(s[6:8])
-        t: Union[dt.date, dt.datetime] = dt.date(y, m, d)
-    elif s.isdigit():
-        t = dt.datetime.fromtimestamp(int(s), dt.timezone.utc)
-    else:
-        parts = s.split()
-        if len(parts) == 3:
-            # 20221125 10:00:00 Europe/Amsterdam
-            # or 20221125  10:00:00 Europe/Amsterdam
-            s0, s1, s2 = parts
-            ss = (s0 + s1).replace('-', '')[:16]
-            t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
-            t = t.replace(tzinfo=getZoneInfo(s2))
-        elif len(parts) == 2 and ':' in parts[0]:
-            # 20220101-10:30:00 US/Eastern
-            ss = parts[0].replace('-', '')[:16]
-            t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
-            t = t.replace(tzinfo=getZoneInfo(parts[1]))
+    if not isinstance(s, str):
+        raise TypeError(
+            f'Expected IB datetime string, got {type(s).__name__}')
+    cleaned = s.strip()
+    if not cleaned:
+        raise ValueError(f'Invalid IB datetime string: {s!r}')
+    try:
+        if len(cleaned) == 8 and cleaned.isdigit():
+            # YYYYmmdd
+            y = int(cleaned[0:4])
+            m = int(cleaned[4:6])
+            d = int(cleaned[6:8])
+            t: Union[dt.date, dt.datetime] = dt.date(y, m, d)
+        elif cleaned.isdigit():
+            t = dt.datetime.fromtimestamp(int(cleaned), dt.timezone.utc)
         else:
-            # YYYYmmdd  HH:MM:SS
-            # or YYYYmmdd-HH:MM:SS
-            # or YYYY-mm-dd HH:MM:SS.0
-            ss = s.replace(' ', '').replace('-', '')[:16]
-            t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+            parts = cleaned.split()
+            if len(parts) == 3:
+                # 20221125 10:00:00 Europe/Amsterdam
+                # or 20221125  10:00:00 Europe/Amsterdam
+                s0, s1, s2 = parts
+                ss = (s0 + s1).replace('-', '')[:16]
+                t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+                t = t.replace(tzinfo=getZoneInfo(s2))
+            elif len(parts) == 2 and ':' in parts[0]:
+                # 20220101-10:30:00 US/Eastern
+                ss = parts[0].replace('-', '')[:16]
+                t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+                t = t.replace(tzinfo=getZoneInfo(parts[1]))
+            else:
+                # YYYYmmdd  HH:MM:SS
+                # or YYYYmmdd-HH:MM:SS
+                # or YYYY-mm-dd HH:MM:SS.0
+                ss = cleaned.replace(' ', '').replace('-', '')[:16]
+                t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+    except (ValueError, OverflowError, OSError) as err:
+        raise ValueError(f'Invalid IB datetime string: {s!r}') from err
     return t
