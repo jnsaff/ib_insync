@@ -1,8 +1,35 @@
-import asyncio
+import ast
 import tkinter as tk
 
 from ib_insync import IB, util
-from ib_insync.contract import *  # noqa
+from ib_insync.contract import (
+    Bag, Bond, CFD, Commodity, ContFuture, Contract, Forex, Future,
+    FuturesOption, Index, MutualFund, Option, Stock, Warrant)
+
+_CONTRACT_TYPES = {
+    cls.__name__: cls for cls in (
+        Bag, Bond, CFD, Commodity, ContFuture, Contract, Forex, Future,
+        FuturesOption, Index, MutualFund, Option, Stock, Warrant)
+}
+
+
+def parse_contract(text: str) -> Contract:
+    """Safely parse a Contract call like Stock('TSLA', 'SMART', 'USD')."""
+    tree = ast.parse(text.strip(), mode='eval')
+    if (not isinstance(tree.body, ast.Call)
+            or not isinstance(tree.body.func, ast.Name)):
+        raise ValueError(f'Invalid contract expression: {text!r}')
+    cls = _CONTRACT_TYPES.get(tree.body.func.id)
+    if cls is None:
+        raise ValueError(f'Unknown contract type: {tree.body.func.id!r}')
+    args = [ast.literal_eval(arg) for arg in tree.body.args]
+    kwargs = {}
+    for kw in tree.body.keywords:
+        if kw.arg is None:
+            raise ValueError('**kwargs unpacking is not allowed')
+        kwargs[kw.arg] = ast.literal_eval(kw.value)
+    return cls(*args, **kwargs)
+
 
 util.patchAsyncio()
 
@@ -26,7 +53,7 @@ class TkApp:
         self.loop = util.getLoop()
 
     def onButtonClick(self):
-        contract = eval(self.entry.get())
+        contract = parse_contract(self.entry.get())
         cds = self.ib.reqContractDetails(contract)
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, str(cds))

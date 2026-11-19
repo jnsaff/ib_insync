@@ -204,12 +204,29 @@ class Client:
         run(self.connectAsync(host, port, clientId, timeout))
 
     async def connectAsync(self, host, port, clientId, timeout=2.0):
+        if not isinstance(host, str) or not host.strip() or any(
+                ch.isspace() or ord(ch) < 32 for ch in host):
+            raise ValueError(f'Invalid host: {host!r}')
+        if isinstance(port, bool):
+            raise ValueError(f'Invalid port: {port!r}')
+        port = int(port)
+        if not 1 <= port <= 65535:
+            raise ValueError(f'Port must be between 1 and 65535, got {port}')
+        if isinstance(clientId, bool):
+            raise ValueError(f'Invalid clientId: {clientId!r}')
+        clientId = int(clientId)
+        if clientId < 0:
+            raise ValueError(f'clientId must be non-negative, got {clientId}')
+        if timeout is not None:
+            if isinstance(timeout, bool) or timeout < 0:
+                raise ValueError(
+                    f'timeout must be None or non-negative, got {timeout!r}')
         try:
             self._logger.info(
                 f'Connecting to {host}:{port} with clientId {clientId}...')
             self.host = host
-            self.port = int(port)
-            self.clientId = int(clientId)
+            self.port = port
+            self.clientId = clientId
             self.connState = Client.CONNECTING
             timeout = timeout or None
             await asyncio.wait_for(self.conn.connectAsync(host, port), timeout)

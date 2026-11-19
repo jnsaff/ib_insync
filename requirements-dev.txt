@@ -1,2 +1,5 @@
+build
+flake8
+mypy
 pytest
 pytest-asyncio

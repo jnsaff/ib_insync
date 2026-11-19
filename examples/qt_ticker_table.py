@@ -1,10 +1,36 @@
-import asyncio
+import ast
 
 import PyQt5.QtWidgets as qt
 # import PySide6.QtWidgets as qt
 
 from ib_insync import IB, util
-from ib_insync.contract import *  # noqa
+from ib_insync.contract import (
+    Bag, Bond, CFD, Commodity, ContFuture, Contract, Forex, Future,
+    FuturesOption, Index, MutualFund, Option, Stock, Warrant)
+
+_CONTRACT_TYPES = {
+    cls.__name__: cls for cls in (
+        Bag, Bond, CFD, Commodity, ContFuture, Contract, Forex, Future,
+        FuturesOption, Index, MutualFund, Option, Stock, Warrant)
+}
+
+
+def parse_contract(text: str) -> Contract:
+    """Safely parse a Contract call like Stock('TSLA', 'SMART', 'USD')."""
+    tree = ast.parse(text.strip(), mode='eval')
+    if (not isinstance(tree.body, ast.Call)
+            or not isinstance(tree.body.func, ast.Name)):
+        raise ValueError(f'Invalid contract expression: {text!r}')
+    cls = _CONTRACT_TYPES.get(tree.body.func.id)
+    if cls is None:
+        raise ValueError(f'Unknown contract type: {tree.body.func.id!r}')
+    args = [ast.literal_eval(arg) for arg in tree.body.args]
+    kwargs = {}
+    for kw in tree.body.keywords:
+        if kw.arg is None:
+            raise ValueError('**kwargs unpacking is not allowed')
+        kwargs[kw.arg] = ast.literal_eval(kw.value)
+    return cls(*args, **kwargs)
 
 
 class TickerTable(qt.QTableWidget):
@@ -73,7 +99,7 @@ class Window(qt.QWidget):
     def add(self, text=''):
         text = text or self.edit.text()
         if text:
-            contract = eval(text)
+            contract = parse_contract(text)
             if (contract and self.ib.qualifyContracts(contract)
                     and contract not in self.table):
                 ticker = self.ib.reqMktData(contract, '', False, False, None)
@@ -88,7 +114,7 @@ class Window(qt.QWidget):
         else:
             self.ib.connect(*self.connectInfo)
             self.ib.reqMarketDataType(2)
-            self.connectButton.setText('Disonnect')
+            self.connectButton.setText('Disconnect')
             for symbol in (
                     'EURUSD', 'USDJPY', 'EURGBP', 'USDCAD',
                     'EURCHF', 'AUDUSD', 'NZDUSD'):

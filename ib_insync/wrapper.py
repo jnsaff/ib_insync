@@ -198,7 +198,7 @@ class Wrapper:
         Start a new request and return the future that is associated
         with the key and container. The container is a list by default.
         """
-        future: asyncio.Future = asyncio.Future()
+        future: asyncio.Future = getLoop().create_future()
         self._futures[key] = future
         self._results[key] = container if container is not None else []
         if contract:

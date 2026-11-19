@@ -5,7 +5,10 @@ import os
 import time
 import xml.etree.ElementTree as et
 from contextlib import suppress
-from urllib.parse import urlencode
+from pathlib import Path
+from typing import Union
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
 from urllib.request import urlopen
 
 from ib_insync import util
@@ -13,9 +16,90 @@ from ib_insync.objects import DynamicObject
 
 _logger = logging.getLogger('ib_insync.flexreport')
 
+_FLEX_SEND_REQUEST_URL = (
+    'https://gdcdyn.interactivebrokers.com'
+    '/Universal/servlet/FlexStatementService.SendRequest')
+
+_ALLOWED_FLEX_DOMAINS = (
+    'interactivebrokers.com',
+    'interactivebrokers.co.uk',
+    'interactivebrokers.eu',
+    'interactivebrokers.ca',
+    'interactivebrokers.com.hk',
+    'interactivebrokers.com.au',
+    'interactivebrokers.com.sg',
+    'interactivebrokers.co.jp',
+    'interactivebrokers.ie',
+    'interactivebrokers.hu',
+    'interactivebrokers.in',
+)
+
 
 class FlexError(Exception):
     pass
+
+
+def _validate_param(name: str, value: Union[str, int]) -> str:
+    """Validate and normalize a Flex Web Service parameter."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f'{name} must be a non-empty string or integer')
+    text = str(value).strip()
+    if not text or any(ch.isspace() or ord(ch) < 32 for ch in text):
+        raise ValueError(f'Invalid {name}: must not be empty or contain '
+                         'whitespace/control characters')
+    return text
+
+
+def _validate_flex_url(url: str) -> str:
+    """Validate that a Flex download URL uses HTTPS on an allowed IB host."""
+    if not isinstance(url, str):
+        raise FlexError('Invalid Flex statement URL')
+    cleaned = url.strip()
+    if not cleaned or any(ch.isspace() or ord(ch) < 32 for ch in cleaned):
+        raise FlexError('Invalid Flex statement URL')
+    parsed = urlparse(cleaned)
+    if parsed.scheme != 'https':
+        raise FlexError(
+            f'Refusing non-HTTPS Flex URL scheme: {parsed.scheme!r}')
+    if parsed.username or parsed.password:
+        raise FlexError(
+            'Refusing Flex statement URL with embedded credentials')
+    host = (parsed.hostname or '').lower()
+    if not host or not any(
+            host == domain or host.endswith('.' + domain)
+            for domain in _ALLOWED_FLEX_DOMAINS):
+        raise FlexError(
+            f'Refusing Flex statement URL with untrusted host: {host!r}')
+    if parsed.query or parsed.fragment:
+        raise FlexError(
+            'Refusing Flex statement URL with unexpected query or fragment')
+    return cleaned
+
+
+def _fetch_url(url: str, timeout: float) -> bytes:
+    """Fetch a validated HTTPS Flex URL without leaking sensitive tokens."""
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            return resp.read()
+    except HTTPError as err:
+        code, reason = err.code, err.reason
+        err.close()
+        raise FlexError(
+            f'Flex request failed with HTTP {code}: {reason}'
+        ) from None
+    except URLError as err:
+        raise FlexError(
+            f'Flex request failed: {err.reason}') from None
+    except OSError as err:
+        raise FlexError(f'Flex request failed: {err}') from None
+
+
+def _parse_xml(data: bytes) -> et.Element:
+    """Parse XML bytes and wrap parse failures in FlexError."""
+    try:
+        return et.fromstring(data)
+    except et.ParseError as err:
+        raise FlexError(f'Failed to parse Flex XML response: {err}') from err
 
 
 class FlexReport:
@@ -38,9 +122,11 @@ class FlexReport:
         """
         self.data = b''
         self.root = et.Element('FlexQueryResponse')
-        if token and queryId:
+        if token is not None or queryId is not None:
+            if token is None or queryId is None:
+                raise ValueError('Both token and queryId must be provided')
             self.download(token, queryId)
-        elif path:
+        elif path is not None:
             self.load(path)
 
     def topics(self):
@@ -72,22 +158,29 @@ class FlexReport:
     def download(self, token, queryId, timeout: float = 30,
                  maxRetries: int = 60):
         """Download report for the given ``token`` and ``queryId``."""
-        params = urlencode({'t': token, 'q': queryId, 'v': '3'})
-        url = (
-            'https://gdcdyn.interactivebrokers.com'
-            f'/Universal/servlet/FlexStatementService.SendRequest?{params}')
-        with urlopen(url, timeout=timeout) as resp:
-            data = resp.read()
+        token_str = _validate_param('token', token)
+        query_id_str = _validate_param('queryId', queryId)
+        if isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError('timeout must be a positive number')
+        if isinstance(maxRetries, bool) or not isinstance(maxRetries, int) \
+                or maxRetries < 1:
+            raise ValueError('maxRetries must be a positive integer')
 
-        root = et.fromstring(data)
+        params = urlencode({'t': token_str, 'q': query_id_str, 'v': '3'})
+        url = f'{_FLEX_SEND_REQUEST_URL}?{params}'
+        data = _fetch_url(url, timeout=timeout)
+
+        root = _parse_xml(data)
         elem = root.find('Status')
         if elem is not None and elem.text == 'Success':
-            elem = root.find('ReferenceCode')
-            assert elem is not None
-            code = elem.text
-            elem = root.find('Url')
-            assert elem is not None
-            baseUrl = elem.text
+            code_elem = root.find('ReferenceCode')
+            code = (code_elem.text or '').strip() \
+                if code_elem is not None else ''
+            if not code:
+                raise FlexError('Missing ReferenceCode in Flex response')
+            url_elem = root.find('Url')
+            raw_url = url_elem.text if url_elem is not None else ''
+            baseUrl = _validate_flex_url(raw_url or '')
             _logger.info('Statement is being prepared...')
         else:
             elem = root.find('ErrorCode')
@@ -98,11 +191,10 @@ class FlexReport:
 
         for _ in range(maxRetries):
             time.sleep(1)
-            pollParams = urlencode({'q': code, 't': token})
+            pollParams = urlencode({'q': code, 't': token_str})
             url = f'{baseUrl}?{pollParams}'
-            with urlopen(url, timeout=timeout) as resp:
-                self.data = resp.read()
-            self.root = et.fromstring(self.data)
+            self.data = _fetch_url(url, timeout=timeout)
+            self.root = _parse_xml(self.data)
             if len(self.root) > 0 and self.root[0].tag == 'code':
                 msg = self.root[0].text
                 if msg and msg.startswith('Statement generation in progress'):
@@ -116,13 +208,20 @@ class FlexReport:
 
     def load(self, path):
         """Load report from XML file."""
-        with open(path, 'rb') as f:
-            self.data = f.read()
-            self.root = et.fromstring(self.data)
+        file_path = Path(path)
+        if not str(path).strip():
+            raise ValueError('path must not be empty')
+        with open(file_path, 'rb') as f:
+            data = f.read()
+        self.root = _parse_xml(data)
+        self.data = data
 
     def save(self, path):
         """Save report to XML file."""
-        with open(path, 'wb') as f:
+        file_path = Path(path)
+        if not str(path).strip():
+            raise ValueError('path must not be empty')
+        with open(file_path, 'wb') as f:
             f.write(self.data)
 
 

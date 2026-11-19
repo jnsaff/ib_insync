@@ -7,17 +7,13 @@ import math
 import signal
 import sys
 import time
+import warnings
 from dataclasses import fields, is_dataclass
 from typing import (
     AsyncIterator, Awaitable, Callable, Iterator, List, Optional, Union)
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import eventkit as ev
-
-try:
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-except ImportError:
-    from backports.zoneinfo import (  # type: ignore
-        ZoneInfo, ZoneInfoNotFoundError)
 
 
 _LEGACY_TZ_ALIASES = {
@@ -344,10 +340,7 @@ def run(*awaitables: Awaitable, timeout: Optional[float] = None):
             return
         loop.run_forever()
         result = None
-        if sys.version_info >= (3, 7):
-            all_tasks = asyncio.all_tasks(loop)  # type: ignore
-        else:
-            all_tasks = asyncio.Task.all_tasks()  # type: ignore
+        all_tasks = asyncio.all_tasks(loop)
         if all_tasks:
             # cancel pending tasks
             f = asyncio.gather(*all_tasks)
@@ -363,7 +356,7 @@ def run(*awaitables: Awaitable, timeout: Optional[float] = None):
             future = asyncio.gather(*awaitables)
         if timeout:
             future = asyncio.wait_for(future, timeout)
-        task = asyncio.ensure_future(future)
+        task = asyncio.ensure_future(future, loop=loop)
 
         err: Optional[BaseException] = None
 
@@ -496,12 +489,32 @@ async def waitUntilAsync(t: Time_t) -> bool:
 def patchAsyncio():
     """Patch asyncio to allow nested event loops."""
     import nest_asyncio
-    nest_asyncio.apply()
+    nest_asyncio.apply(getLoop())
 
 
-def getLoop():
+def getLoop() -> asyncio.AbstractEventLoop:
     """Get the asyncio event loop for the current thread."""
-    return asyncio.get_event_loop_policy().get_event_loop()
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    loop: Optional[asyncio.AbstractEventLoop]
+    if sys.version_info >= (3, 14):
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            try:
+                loop = asyncio.get_event_loop_policy().get_event_loop()
+            except RuntimeError:
+                loop = None
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
 
 
 def startLoop():
