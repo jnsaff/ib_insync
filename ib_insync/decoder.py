@@ -4,6 +4,7 @@ import dataclasses
 import logging
 import math
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -23,11 +24,11 @@ from .wrapper import Wrapper
 class Decoder:
     """Decode IB messages and invoke corresponding wrapper methods."""
 
-    def __init__(self, wrapper: Wrapper, serverVersion: int):
+    def __init__(self, wrapper: Wrapper, serverVersion: int) -> None:
         self.wrapper = wrapper
         self.serverVersion = serverVersion
         self.logger = logging.getLogger('ib_insync.Decoder')
-        self.handlers = {
+        self.handlers: dict[int, Callable[[list[Any]], None]] = {
             1: self.priceSizeTick,
             2: self.wrap(
                 'tickSize', [int, int, float]),
@@ -169,14 +170,16 @@ class Decoder:
                 'userInfo', [int, str], skip=1)
         }
 
-    def wrap(self, methodName, types, skip=2):
+    def wrap(
+            self, methodName: str, types: list[type[Any]],
+            skip: int = 2) -> Callable[[list[Any]], None]:
         """
         Create a message handler that invokes a wrapper method
         with the in-order message fields as parameters, skipping over
         the first ``skip`` fields, and parsed according to the ``types`` list.
         """
 
-        def handler(fields):
+        def handler(fields: list[Any]) -> None:
             method = getattr(self.wrapper, methodName, None)
             if method:
                 expected = skip + len(types)
@@ -199,7 +202,7 @@ class Decoder:
 
         return handler
 
-    def interpret(self, fields):
+    def interpret(self, fields: list[Any]) -> None:
         """Decode fields and invoke corresponding wrapper method."""
         if not fields:
             self.logger.warning('Received empty message fields')
@@ -220,7 +223,7 @@ class Decoder:
         except Exception:
             self.logger.exception(f'Error handling fields: {fields}')
 
-    def parse(self, obj):
+    def parse(self, obj: Any) -> None:
         """Parse the object's properties according to its default types."""
         for field in dataclasses.fields(obj):
             typ = type(field.default)
@@ -249,7 +252,7 @@ class Decoder:
                     field.default)
                 setattr(obj, field.name, field.default)
 
-    def priceSizeTick(self, fields):
+    def priceSizeTick(self, fields: list[Any]) -> None:
         _, _, reqId, tickType, price, size, attrib = fields
 
         if price:
@@ -276,7 +279,7 @@ class Decoder:
                 if tickSize and sizeTickType is not None and sizeFloat:
                     tickSize(reqIdInt, sizeTickType, sizeFloat)
 
-    def errorMsg(self, fields):
+    def errorMsg(self, fields: list[Any]) -> None:
         _, _, reqId, errorCode, errorString, *fields = fields
         advancedOrderRejectJson = ''
         if self.serverVersion >= 166:
@@ -284,7 +287,7 @@ class Decoder:
         self.wrapper.error(
             int(reqId), int(errorCode), errorString, advancedOrderRejectJson)
 
-    def updatePortfolio(self, fields):
+    def updatePortfolio(self, fields: list[Any]) -> None:
         c = Contract()
         (
             _, _,
@@ -313,7 +316,7 @@ class Decoder:
             float(marketValue), float(averageCost), float(unrealizedPNL),
             float(realizedPNL), accountName)
 
-    def contractDetails(self, fields):
+    def contractDetails(self, fields: list[Any]) -> None:
         cd = ContractDetails()
         cd.contract = c = Contract()
         if self.serverVersion < 164:
@@ -396,7 +399,7 @@ class Decoder:
         self.parse(c)
         self.wrapper.contractDetails(int(reqId), cd)
 
-    def bondContractDetails(self, fields):
+    def bondContractDetails(self, fields: list[Any]) -> None:
         cd = ContractDetails()
         cd.contract = c = Contract()
         if self.serverVersion < 164:
@@ -467,7 +470,7 @@ class Decoder:
         self.parse(c)
         self.wrapper.bondContractDetails(int(reqId), cd)
 
-    def execDetails(self, fields):
+    def execDetails(self, fields: list[Any]) -> None:
         c = Contract()
         ex = Execution()
         (
@@ -516,7 +519,7 @@ class Decoder:
         ex.time = time.astimezone(timezone.utc)
         self.wrapper.execDetails(int(reqId), c, ex)
 
-    def historicalData(self, fields):
+    def historicalData(self, fields: list[Any]) -> None:
         _, reqId, startDateStr, endDateStr, numBars, *fields = fields
         get = iter(fields).__next__
 
@@ -534,7 +537,7 @@ class Decoder:
 
         self.wrapper.historicalDataEnd(int(reqId), startDateStr, endDateStr)
 
-    def historicalDataUpdate(self, fields):
+    def historicalDataUpdate(self, fields: list[Any]) -> None:
         _, reqId, *fields = fields
         get = iter(fields).__next__
 
@@ -550,7 +553,7 @@ class Decoder:
 
         self.wrapper.historicalDataUpdate(int(reqId), bar)
 
-    def scannerData(self, fields):
+    def scannerData(self, fields: list[Any]) -> None:
         _, _, reqId, n, *fields = fields
 
         for _ in range(int(n)):
@@ -583,7 +586,7 @@ class Decoder:
 
         self.wrapper.scannerDataEnd(int(reqId))
 
-    def tickOptionComputation(self, fields):
+    def tickOptionComputation(self, fields: list[Any]) -> None:
         _, reqId, tickTypeInt, tickAttrib, *fields = fields
         impliedVol, delta, optPrice, pvDividend, \
             gamma, vega, theta, undPrice = fields
@@ -599,14 +602,14 @@ class Decoder:
             float(theta) if theta else -2.0,
             float(undPrice) if undPrice else -1.0)
 
-    def deltaNeutralValidation(self, fields):
+    def deltaNeutralValidation(self, fields: list[Any]) -> None:
         _, _, reqId, conId, delta, price = fields
 
         self.wrapper.deltaNeutralValidation(
             int(reqId), DeltaNeutralContract(
                 int(conId), float(delta or 0), float(price or 0)))
 
-    def commissionReport(self, fields):
+    def commissionReport(self, fields: list[Any]) -> None:
         _, _, execId, commission, currency, realizedPNL, \
             yield_, yieldRedemptionDate = fields
 
@@ -616,7 +619,7 @@ class Decoder:
                 float(realizedPNL or 0), float(yield_ or 0),
                 int(yieldRedemptionDate or 0)))
 
-    def position(self, fields):
+    def position(self, fields: list[Any]) -> None:
         c = Contract()
         (
             _, _,
@@ -639,7 +642,7 @@ class Decoder:
         self.wrapper.position(
             account, c, float(position or 0), float(avgCost or 0))
 
-    def positionMulti(self, fields):
+    def positionMulti(self, fields: list[Any]) -> None:
         c = Contract()
         (
             _, _,
@@ -665,7 +668,7 @@ class Decoder:
             int(reqId), account, modelCode, c,
             float(position or 0), float(avgCost or 0))
 
-    def securityDefinitionOptionParameter(self, fields):
+    def securityDefinitionOptionParameter(self, fields: list[Any]) -> None:
         _, reqId, exchange, underlyingConId, tradingClass, multiplier, \
             n, *fields = fields
         n = int(n)
@@ -677,7 +680,7 @@ class Decoder:
             int(reqId), exchange, int(underlyingConId or 0), tradingClass,
             multiplier, expirations, strikes)
 
-    def softDollarTiers(self, fields):
+    def softDollarTiers(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -690,7 +693,7 @@ class Decoder:
 
         self.wrapper.softDollarTiers(int(reqId), tiers)
 
-    def familyCodes(self, fields):
+    def familyCodes(self, fields: list[Any]) -> None:
         _, n, *fields = fields
         get = iter(fields).__next__
 
@@ -702,7 +705,7 @@ class Decoder:
 
         self.wrapper.familyCodes(familyCodes)
 
-    def symbolSamples(self, fields):
+    def symbolSamples(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
 
         cds = []
@@ -724,7 +727,7 @@ class Decoder:
 
         self.wrapper.symbolSamples(int(reqId), cds)
 
-    def smartComponents(self, fields):
+    def smartComponents(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -737,7 +740,7 @@ class Decoder:
 
         self.wrapper.smartComponents(int(reqId), components)
 
-    def mktDepthExchanges(self, fields):
+    def mktDepthExchanges(self, fields: list[Any]) -> None:
         _, n, *fields = fields
         get = iter(fields).__next__
 
@@ -752,7 +755,7 @@ class Decoder:
 
         self.wrapper.mktDepthExchanges(descriptions)
 
-    def newsProviders(self, fields):
+    def newsProviders(self, fields: list[Any]) -> None:
         _, n, *fields = fields
         get = iter(fields).__next__
 
@@ -764,7 +767,7 @@ class Decoder:
 
         self.wrapper.newsProviders(providers)
 
-    def histogramData(self, fields):
+    def histogramData(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -776,7 +779,7 @@ class Decoder:
 
         self.wrapper.histogramData(int(reqId), histogram)
 
-    def marketRule(self, fields):
+    def marketRule(self, fields: list[Any]) -> None:
         _, marketRuleId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -788,7 +791,7 @@ class Decoder:
 
         self.wrapper.marketRule(int(marketRuleId), increments)
 
-    def historicalTicks(self, fields):
+    def historicalTicks(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -805,7 +808,7 @@ class Decoder:
         done = bool(int(get()))
         self.wrapper.historicalTicks(int(reqId), ticks, done)
 
-    def historicalTicksBidAsk(self, fields):
+    def historicalTicksBidAsk(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -828,7 +831,7 @@ class Decoder:
         done = bool(int(get()))
         self.wrapper.historicalTicksBidAsk(int(reqId), ticks, done)
 
-    def historicalTicksLast(self, fields):
+    def historicalTicksLast(self, fields: list[Any]) -> None:
         _, reqId, n, *fields = fields
         get = iter(fields).__next__
 
@@ -851,7 +854,7 @@ class Decoder:
         done = bool(int(get()))
         self.wrapper.historicalTicksLast(int(reqId), ticks, done)
 
-    def tickByTick(self, fields):
+    def tickByTick(self, fields: list[Any]) -> None:
         _, reqId, tickType, time, *fields = fields
         reqId = int(reqId)
         tickType = int(tickType)
@@ -884,7 +887,7 @@ class Decoder:
 
             self.wrapper.tickByTickMidPoint(reqId, time, float(midPoint))
 
-    def openOrder(self, fields):
+    def openOrder(self, fields: list[Any]) -> None:
         o = Order()
         c = Contract()
         st = OrderState()
@@ -1142,7 +1145,7 @@ class Decoder:
         self.parse(st)
         self.wrapper.openOrder(o.orderId, c, o, st)
 
-    def completedOrder(self, fields):
+    def completedOrder(self, fields: list[Any]) -> None:
         o = Order()
         c = Contract()
         st = OrderState()
@@ -1361,7 +1364,7 @@ class Decoder:
         self.parse(st)
         self.wrapper.completedOrder(c, o, st)
 
-    def historicalSchedule(self, fields):
+    def historicalSchedule(self, fields: list[Any]) -> None:
         (
             _,
             reqId,

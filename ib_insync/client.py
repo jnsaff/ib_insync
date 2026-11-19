@@ -7,15 +7,20 @@ import math
 import struct
 import time
 from collections import deque
-from typing import Deque, List, Optional
+from typing import Any, TYPE_CHECKING
 
 from eventkit import Event
 
 from .connection import Connection
-from .contract import Contract
+from .contract import Contract, TagValue
 from .decoder import Decoder
-from .objects import ConnectionStats, WshEventData
+from .objects import (
+    ConnectionStats, ExecutionFilter, ScannerSubscription, WshEventData)
+from .order import Order
 from .util import UNSET_DOUBLE, UNSET_INTEGER, dataclassAsTuple, getLoop, run
+
+if TYPE_CHECKING:
+    from .wrapper import Wrapper
 
 
 class Client:
@@ -90,7 +95,7 @@ class Client:
 
     (DISCONNECTED, CONNECTING, CONNECTED) = range(3)
 
-    def __init__(self, wrapper):
+    def __init__(self, wrapper: 'Wrapper') -> None:
         self.wrapper = wrapper
         self.decoder = Decoder(wrapper, 0)
         self.apiStart = Event('apiStart')
@@ -114,17 +119,17 @@ class Client:
         self.clientId = -1
         self.optCapab = ''
         self.connectOptions = b''
-        self._throttleHandle: Optional[asyncio.TimerHandle] = None
+        self._throttleHandle: asyncio.TimerHandle | None = None
         self.reset()
 
-    def reset(self):
+    def reset(self) -> None:
         self.connState = Client.DISCONNECTED
         self._apiReady = False
         self._serverVersion = 0
         self._data = b''
         self._hasReqId = False
         self._reqIdSeq = 0
-        self._accounts = []
+        self._accounts: list[str] = []
         self._startTime = time.time()
         self._numBytesRecv = 0
         self._numMsgRecv = 0
@@ -132,17 +137,17 @@ class Client:
         if self._throttleHandle:
             self._throttleHandle.cancel()
             self._throttleHandle = None
-        self._msgQ: Deque[str] = deque()
-        self._timeQ: Deque[float] = deque()
+        self._msgQ: deque[str] = deque()
+        self._timeQ: deque[float] = deque()
 
     def serverVersion(self) -> int:
         return self._serverVersion
 
-    def run(self):
+    def run(self) -> None:
         loop = getLoop()
         loop.run_forever()
 
-    def isConnected(self):
+    def isConnected(self) -> bool:
         return self.connState == Client.CONNECTED
 
     def isReady(self) -> bool:
@@ -167,17 +172,17 @@ class Client:
         self._reqIdSeq += 1
         return newId
 
-    def updateReqId(self, minReqId):
+    def updateReqId(self, minReqId: int) -> None:
         """Update the next reqId to be at least ``minReqId``."""
         self._reqIdSeq = max(self._reqIdSeq, minReqId)
 
-    def getAccounts(self) -> List[str]:
+    def getAccounts(self) -> list[str]:
         """Get the list of account names that are under management."""
         if not self.isReady():
             raise ConnectionError('Not connected')
         return self._accounts
 
-    def setConnectOptions(self, connectOptions: str):
+    def setConnectOptions(self, connectOptions: str) -> None:
         """
         Set additional connect options.
 
@@ -189,7 +194,7 @@ class Client:
 
     def connect(
             self, host: str, port: int, clientId: int,
-            timeout: Optional[float] = 2.0):
+            timeout: float | None = 2.0) -> None:
         """
         Connect to a running TWS or IB gateway application.
 
@@ -204,7 +209,9 @@ class Client:
         """
         run(self.connectAsync(host, port, clientId, timeout))
 
-    async def connectAsync(self, host, port, clientId, timeout=2.0):
+    async def connectAsync(
+            self, host: str, port: int, clientId: int,
+            timeout: float | None = 2.0) -> None:
         if not isinstance(host, str) or not host.strip() or any(
                 ch.isspace() or ord(ch) < 32 for ch in host):
             raise ValueError(f'Invalid host: {host!r}')
@@ -240,27 +247,28 @@ class Client:
             self._logger.info('API connection ready')
         except BaseException as e:
             self.disconnect()
-            msg = f'API connection failed: {e!r}'
-            self._logger.error(msg)
-            self.apiError.emit(msg)
+            msg_str = f'API connection failed: {e!r}'
+            self._logger.error(msg_str)
+            self.apiError.emit(msg_str)
             if isinstance(e, ConnectionRefusedError):
                 self._logger.error('Make sure API port on TWS/IBG is open')
             raise
 
-    def disconnect(self):
+    def disconnect(self) -> None:
         """Disconnect from IB connection."""
         self._logger.info('Disconnecting')
         self.connState = Client.DISCONNECTED
         self.conn.disconnect()
         self.reset()
 
-    def send(self, *fields, makeEmpty=True):
+    def send(self, *fields: Any, makeEmpty: bool = True) -> None:
         """Serialize and send the given fields using the IB socket protocol."""
         if not self.isConnected():
             raise ConnectionError('Not connected')
 
         msg = io.StringIO()
-        empty = (None, UNSET_INTEGER, UNSET_DOUBLE) if makeEmpty else (None,)
+        empty: tuple[Any, ...] = (
+            (None, UNSET_INTEGER, UNSET_DOUBLE) if makeEmpty else (None,))
         for field in fields:
             typ = type(field)
             if field in empty:
@@ -290,7 +298,7 @@ class Client:
             msg.write('\0')
         self.sendMsg(msg.getvalue())
 
-    def sendMsg(self, msg: Optional[str]):
+    def sendMsg(self, msg: str | None) -> None:
         loop = getLoop()
         t = loop.time()
         times = self._timeQ
@@ -323,15 +331,15 @@ class Client:
                 self.throttleEnd.emit()
                 self._logger.debug('Stopped to throttle requests')
 
-    def _onThrottleTimer(self):
+    def _onThrottleTimer(self) -> None:
         self._throttleHandle = None
         self.sendMsg(None)
 
-    def _prefix(self, msg):
+    def _prefix(self, msg: bytes) -> bytes:
         # prefix a message with its length
         return struct.pack('>I', len(msg)) + msg
 
-    def _onSocketHasData(self, data):
+    def _onSocketHasData(self, data: bytes) -> None:
         debug = self._logger.isEnabledFor(logging.DEBUG)
         if self._tcpDataArrived:
             self._tcpDataArrived()
@@ -415,7 +423,7 @@ class Client:
         if self._tcpDataProcessed:
             self._tcpDataProcessed()
 
-    def _onSocketDisconnected(self, msg):
+    def _onSocketDisconnected(self, msg: str) -> None:
         wasReady = self.isReady()
         if not self.isConnected():
             self._logger.info('Disconnected.')
@@ -437,9 +445,10 @@ class Client:
     # the message type id is sent first, often followed by a version number
 
     def reqMktData(
-            self, reqId, contract, genericTickList, snapshot,
-            regulatorySnapshot, mktDataOptions):
-        fields = [1, 11, reqId, contract]
+            self, reqId: int, contract: Contract, genericTickList: str,
+            snapshot: bool, regulatorySnapshot: bool,
+            mktDataOptions: list[TagValue] | None) -> None:
+        fields: list[Any] = [1, 11, reqId, contract]
 
         if contract.secType == 'BAG':
             legs = contract.comboLegs or []
@@ -457,10 +466,11 @@ class Client:
             genericTickList, snapshot, regulatorySnapshot, mktDataOptions]
         self.send(*fields)
 
-    def cancelMktData(self, reqId):
+    def cancelMktData(self, reqId: int) -> None:
         self.send(2, 2, reqId)
 
-    def placeOrder(self, orderId, contract, order):
+    def placeOrder(
+            self, orderId: int, contract: Contract, order: Order) -> None:
         version = self.serverVersion()
         fields = [
             3, orderId,
@@ -501,10 +511,10 @@ class Client:
                     leg.designatedLocation,
                     leg.exemptCode]
 
-            legs = order.orderComboLegs or []
-            fields += [len(legs)]
-            for leg in legs:
-                fields += [leg.price]
+            orderLegs = order.orderComboLegs or []
+            fields += [len(orderLegs)]
+            for orderLeg in orderLegs:
+                fields += [orderLeg.price]
 
             params = order.smartComboRoutingParams or []
             fields += [len(params)]
@@ -674,19 +684,20 @@ class Client:
 
         self.send(*fields)
 
-    def cancelOrder(self, orderId, manualCancelOrderTime=''):
-        fields = [4, 1, orderId]
+    def cancelOrder(
+            self, orderId: int, manualCancelOrderTime: str = '') -> None:
+        fields: list[Any] = [4, 1, orderId]
         if self.serverVersion() >= 169:
             fields += [manualCancelOrderTime]
         self.send(*fields)
 
-    def reqOpenOrders(self):
+    def reqOpenOrders(self) -> None:
         self.send(5, 1)
 
-    def reqAccountUpdates(self, subscribe, acctCode):
+    def reqAccountUpdates(self, subscribe: bool, acctCode: str) -> None:
         self.send(6, 2, subscribe, acctCode)
 
-    def reqExecutions(self, reqId, execFilter):
+    def reqExecutions(self, reqId: int, execFilter: ExecutionFilter) -> None:
         self.send(
             7, 3, reqId,
             execFilter.clientId,
@@ -697,11 +708,11 @@ class Client:
             execFilter.exchange,
             execFilter.side)
 
-    def reqIds(self, numIds):
+    def reqIds(self, numIds: int) -> None:
         self.send(8, 1, numIds)
 
-    def reqContractDetails(self, reqId, contract):
-        fields = [
+    def reqContractDetails(self, reqId: int, contract: Contract) -> None:
+        fields: list[Any] = [
             9, 8, reqId,
             contract,
             contract.includeExpired,
@@ -712,7 +723,9 @@ class Client:
         self.send(*fields)
 
     def reqMktDepth(
-            self, reqId, contract, numRows, isSmartDepth, mktDepthOptions):
+            self, reqId: int, contract: Contract, numRows: int,
+            isSmartDepth: bool,
+            mktDepthOptions: list[TagValue] | None) -> None:
         self.send(
             10, 5, reqId,
             contract.conId,
@@ -731,37 +744,39 @@ class Client:
             isSmartDepth,
             mktDepthOptions)
 
-    def cancelMktDepth(self, reqId, isSmartDepth):
+    def cancelMktDepth(self, reqId: int, isSmartDepth: bool) -> None:
         self.send(11, 1, reqId, isSmartDepth)
 
-    def reqNewsBulletins(self, allMsgs):
+    def reqNewsBulletins(self, allMsgs: bool) -> None:
         self.send(12, 1, allMsgs)
 
-    def cancelNewsBulletins(self):
+    def cancelNewsBulletins(self) -> None:
         self.send(13, 1)
 
-    def setServerLogLevel(self, logLevel):
+    def setServerLogLevel(self, logLevel: int) -> None:
         self.send(14, 1, logLevel)
 
-    def reqAutoOpenOrders(self, bAutoBind):
+    def reqAutoOpenOrders(self, bAutoBind: bool) -> None:
         self.send(15, 1, bAutoBind)
 
-    def reqAllOpenOrders(self):
+    def reqAllOpenOrders(self) -> None:
         self.send(16, 1)
 
-    def reqManagedAccts(self):
+    def reqManagedAccts(self) -> None:
         self.send(17, 1)
 
-    def requestFA(self, faData):
+    def requestFA(self, faData: int) -> None:
         self.send(18, 1, faData)
 
-    def replaceFA(self, reqId, faData, cxml):
+    def replaceFA(self, reqId: int, faData: int, cxml: str) -> None:
         self.send(19, 1, faData, cxml, reqId)
 
     def reqHistoricalData(
-            self, reqId, contract, endDateTime, durationStr, barSizeSetting,
-            whatToShow, useRTH, formatDate, keepUpToDate, chartOptions):
-        fields = [
+            self, reqId: int, contract: Contract, endDateTime: str,
+            durationStr: str, barSizeSetting: str, whatToShow: str,
+            useRTH: bool, formatDate: int, keepUpToDate: bool,
+            chartOptions: list[TagValue] | None) -> None:
+        fields: list[Any] = [
             20, reqId, contract, contract.includeExpired,
             endDateTime, barSizeSetting, durationStr, useRTH,
             whatToShow, formatDate]
@@ -776,8 +791,8 @@ class Client:
         self.send(*fields)
 
     def exerciseOptions(
-            self, reqId, contract, exerciseAction,
-            exerciseQuantity, account, override):
+            self, reqId: int, contract: Contract, exerciseAction: int,
+            exerciseQuantity: int, account: str, override: int) -> None:
         self.send(
             21, 2, reqId,
             contract.conId,
@@ -794,8 +809,9 @@ class Client:
             exerciseAction, exerciseQuantity, account, override)
 
     def reqScannerSubscription(
-            self, reqId, subscription, scannerSubscriptionOptions,
-            scannerSubscriptionFilterOptions):
+            self, reqId: int, subscription: ScannerSubscription,
+            scannerSubscriptionOptions: list[TagValue] | None,
+            scannerSubscriptionFilterOptions: list[TagValue] | None) -> None:
         sub = subscription
         self.send(
             22, reqId,
@@ -823,30 +839,32 @@ class Client:
             scannerSubscriptionFilterOptions,
             scannerSubscriptionOptions)
 
-    def cancelScannerSubscription(self, reqId):
+    def cancelScannerSubscription(self, reqId: int) -> None:
         self.send(23, 1, reqId)
 
-    def reqScannerParameters(self):
+    def reqScannerParameters(self) -> None:
         self.send(24, 1)
 
-    def cancelHistoricalData(self, reqId):
+    def cancelHistoricalData(self, reqId: int) -> None:
         self.send(25, 1, reqId)
 
-    def reqCurrentTime(self):
+    def reqCurrentTime(self) -> None:
         self.send(49, 1)
 
     def reqRealTimeBars(
-            self, reqId, contract, barSize, whatToShow,
-            useRTH, realTimeBarsOptions):
+            self, reqId: int, contract: Contract, barSize: int,
+            whatToShow: str, useRTH: bool,
+            realTimeBarsOptions: list[TagValue] | None) -> None:
         self.send(
             50, 3, reqId, contract, barSize, whatToShow,
             useRTH, realTimeBarsOptions)
 
-    def cancelRealTimeBars(self, reqId):
+    def cancelRealTimeBars(self, reqId: int) -> None:
         self.send(51, 1, reqId)
 
     def reqFundamentalData(
-            self, reqId, contract, reportType, fundamentalDataOptions):
+            self, reqId: int, contract: Contract, reportType: str,
+            fundamentalDataOptions: list[TagValue] | None) -> None:
         options = fundamentalDataOptions or []
         self.send(
             52, 2, reqId,
@@ -859,180 +877,199 @@ class Client:
             contract.localSymbol,
             reportType, len(options), options)
 
-    def cancelFundamentalData(self, reqId):
+    def cancelFundamentalData(self, reqId: int) -> None:
         self.send(53, 1, reqId)
 
     def calculateImpliedVolatility(
-            self, reqId, contract, optionPrice, underPrice, implVolOptions):
+            self, reqId: int, contract: Contract, optionPrice: float,
+            underPrice: float,
+            implVolOptions: list[TagValue] | None) -> None:
         options = implVolOptions or []
         self.send(
             54, 3, reqId, contract, optionPrice, underPrice,
             len(options), options)
 
     def calculateOptionPrice(
-            self, reqId, contract, volatility, underPrice, optPrcOptions):
+            self, reqId: int, contract: Contract, volatility: float,
+            underPrice: float,
+            optPrcOptions: list[TagValue] | None) -> None:
         options = optPrcOptions or []
         self.send(
             55, 3, reqId, contract, volatility, underPrice,
             len(options), options)
 
-    def cancelCalculateImpliedVolatility(self, reqId):
+    def cancelCalculateImpliedVolatility(self, reqId: int) -> None:
         self.send(56, 1, reqId)
 
-    def cancelCalculateOptionPrice(self, reqId):
+    def cancelCalculateOptionPrice(self, reqId: int) -> None:
         self.send(57, 1, reqId)
 
-    def reqGlobalCancel(self):
+    def reqGlobalCancel(self) -> None:
         self.send(58, 1)
 
-    def reqMarketDataType(self, marketDataType):
+    def reqMarketDataType(self, marketDataType: int) -> None:
         self.send(59, 1, marketDataType)
 
-    def reqPositions(self):
+    def reqPositions(self) -> None:
         self.send(61, 1)
 
-    def reqAccountSummary(self, reqId, groupName, tags):
+    def reqAccountSummary(
+            self, reqId: int, groupName: str, tags: str) -> None:
         self.send(62, 1, reqId, groupName, tags)
 
-    def cancelAccountSummary(self, reqId):
+    def cancelAccountSummary(self, reqId: int) -> None:
         self.send(63, 1, reqId)
 
-    def cancelPositions(self):
+    def cancelPositions(self) -> None:
         self.send(64, 1)
 
-    def verifyRequest(self, apiName, apiVersion):
+    def verifyRequest(self, apiName: str, apiVersion: str) -> None:
         self.send(65, 1, apiName, apiVersion)
 
-    def verifyMessage(self, apiData):
+    def verifyMessage(self, apiData: str) -> None:
         self.send(66, 1, apiData)
 
-    def queryDisplayGroups(self, reqId):
+    def queryDisplayGroups(self, reqId: int) -> None:
         self.send(67, 1, reqId)
 
-    def subscribeToGroupEvents(self, reqId, groupId):
+    def subscribeToGroupEvents(self, reqId: int, groupId: int) -> None:
         self.send(68, 1, reqId, groupId)
 
-    def updateDisplayGroup(self, reqId, contractInfo):
+    def updateDisplayGroup(self, reqId: int, contractInfo: str) -> None:
         self.send(69, 1, reqId, contractInfo)
 
-    def unsubscribeFromGroupEvents(self, reqId):
+    def unsubscribeFromGroupEvents(self, reqId: int) -> None:
         self.send(70, 1, reqId)
 
-    def startApi(self):
+    def startApi(self) -> None:
         self.send(71, 2, self.clientId, self.optCapab)
 
-    def verifyAndAuthRequest(self, apiName, apiVersion, opaqueIsvKey):
+    def verifyAndAuthRequest(
+            self, apiName: str, apiVersion: str, opaqueIsvKey: str) -> None:
         self.send(72, 1, apiName, apiVersion, opaqueIsvKey)
 
-    def verifyAndAuthMessage(self, apiData, xyzResponse):
+    def verifyAndAuthMessage(self, apiData: str, xyzResponse: str) -> None:
         self.send(73, 1, apiData, xyzResponse)
 
-    def reqPositionsMulti(self, reqId, account, modelCode):
+    def reqPositionsMulti(
+            self, reqId: int, account: str, modelCode: str) -> None:
         self.send(74, 1, reqId, account, modelCode)
 
-    def cancelPositionsMulti(self, reqId):
+    def cancelPositionsMulti(self, reqId: int) -> None:
         self.send(75, 1, reqId)
 
-    def reqAccountUpdatesMulti(self, reqId, account, modelCode, ledgerAndNLV):
+    def reqAccountUpdatesMulti(
+            self, reqId: int, account: str, modelCode: str,
+            ledgerAndNLV: bool) -> None:
         self.send(76, 1, reqId, account, modelCode, ledgerAndNLV)
 
-    def cancelAccountUpdatesMulti(self, reqId):
+    def cancelAccountUpdatesMulti(self, reqId: int) -> None:
         self.send(77, 1, reqId)
 
     def reqSecDefOptParams(
-            self, reqId, underlyingSymbol, futFopExchange,
-            underlyingSecType, underlyingConId):
+            self, reqId: int, underlyingSymbol: str, futFopExchange: str,
+            underlyingSecType: str, underlyingConId: int) -> None:
         self.send(
             78, reqId, underlyingSymbol, futFopExchange,
             underlyingSecType, underlyingConId)
 
-    def reqSoftDollarTiers(self, reqId):
+    def reqSoftDollarTiers(self, reqId: int) -> None:
         self.send(79, reqId)
 
-    def reqFamilyCodes(self):
+    def reqFamilyCodes(self) -> None:
         self.send(80)
 
-    def reqMatchingSymbols(self, reqId, pattern):
+    def reqMatchingSymbols(self, reqId: int, pattern: str) -> None:
         self.send(81, reqId, pattern)
 
-    def reqMktDepthExchanges(self):
+    def reqMktDepthExchanges(self) -> None:
         self.send(82)
 
-    def reqSmartComponents(self, reqId, bboExchange):
+    def reqSmartComponents(self, reqId: int, bboExchange: str) -> None:
         self.send(83, reqId, bboExchange)
 
     def reqNewsArticle(
-            self, reqId, providerCode, articleId, newsArticleOptions):
+            self, reqId: int, providerCode: str, articleId: str,
+            newsArticleOptions: list[TagValue] | None) -> None:
         self.send(84, reqId, providerCode, articleId, newsArticleOptions)
 
-    def reqNewsProviders(self):
+    def reqNewsProviders(self) -> None:
         self.send(85)
 
     def reqHistoricalNews(
-            self, reqId, conId, providerCodes, startDateTime, endDateTime,
-            totalResults, historicalNewsOptions):
+            self, reqId: int, conId: int, providerCodes: str,
+            startDateTime: str, endDateTime: str, totalResults: int,
+            historicalNewsOptions: list[TagValue] | None) -> None:
         self.send(
             86, reqId, conId, providerCodes, startDateTime, endDateTime,
             totalResults, historicalNewsOptions)
 
     def reqHeadTimeStamp(
-            self, reqId, contract, whatToShow, useRTH, formatDate):
+            self, reqId: int, contract: Contract, whatToShow: str,
+            useRTH: bool, formatDate: int) -> None:
         self.send(
             87, reqId, contract, contract.includeExpired,
             useRTH, whatToShow, formatDate)
 
-    def reqHistogramData(self, tickerId, contract, useRTH, timePeriod):
+    def reqHistogramData(
+            self, tickerId: int, contract: Contract, useRTH: bool,
+            timePeriod: str) -> None:
         self.send(
             88, tickerId, contract, contract.includeExpired,
             useRTH, timePeriod)
 
-    def cancelHistogramData(self, tickerId):
+    def cancelHistogramData(self, tickerId: int) -> None:
         self.send(89, tickerId)
 
-    def cancelHeadTimeStamp(self, reqId):
+    def cancelHeadTimeStamp(self, reqId: int) -> None:
         self.send(90, reqId)
 
-    def reqMarketRule(self, marketRuleId):
+    def reqMarketRule(self, marketRuleId: int) -> None:
         self.send(91, marketRuleId)
 
-    def reqPnL(self, reqId, account, modelCode):
+    def reqPnL(self, reqId: int, account: str, modelCode: str) -> None:
         self.send(92, reqId, account, modelCode)
 
-    def cancelPnL(self, reqId):
+    def cancelPnL(self, reqId: int) -> None:
         self.send(93, reqId)
 
-    def reqPnLSingle(self, reqId, account, modelCode, conid):
+    def reqPnLSingle(
+            self, reqId: int, account: str, modelCode: str,
+            conid: int) -> None:
         self.send(94, reqId, account, modelCode, conid)
 
-    def cancelPnLSingle(self, reqId):
+    def cancelPnLSingle(self, reqId: int) -> None:
         self.send(95, reqId)
 
     def reqHistoricalTicks(
-            self, reqId, contract, startDateTime, endDateTime,
-            numberOfTicks, whatToShow, useRth, ignoreSize, miscOptions):
+            self, reqId: int, contract: Contract, startDateTime: str,
+            endDateTime: str, numberOfTicks: int, whatToShow: str,
+            useRth: bool, ignoreSize: bool,
+            miscOptions: list[TagValue] | None) -> None:
         self.send(
             96, reqId, contract, contract.includeExpired,
             startDateTime, endDateTime, numberOfTicks, whatToShow,
             useRth, ignoreSize, miscOptions)
 
     def reqTickByTickData(
-            self, reqId, contract, tickType, numberOfTicks, ignoreSize):
+            self, reqId: int, contract: Contract, tickType: str,
+            numberOfTicks: int, ignoreSize: bool) -> None:
         self.send(97, reqId, contract, tickType, numberOfTicks, ignoreSize)
 
-    def cancelTickByTickData(self, reqId):
+    def cancelTickByTickData(self, reqId: int) -> None:
         self.send(98, reqId)
 
-    def reqCompletedOrders(self, apiOnly):
+    def reqCompletedOrders(self, apiOnly: bool) -> None:
         self.send(99, apiOnly)
 
-    def reqWshMetaData(self, reqId):
+    def reqWshMetaData(self, reqId: int) -> None:
         self.send(100, reqId)
 
-    def cancelWshMetaData(self, reqId):
+    def cancelWshMetaData(self, reqId: int) -> None:
         self.send(101, reqId)
 
-    def reqWshEventData(self, reqId, data: WshEventData):
-        fields = [102, reqId, data.conId]
+    def reqWshEventData(self, reqId: int, data: WshEventData) -> None:
+        fields: list[Any] = [102, reqId, data.conId]
         if self.serverVersion() >= 171:
             fields += [
                 data.filter,
@@ -1046,8 +1083,8 @@ class Client:
                 data.totalLimit]
         self.send(*fields, makeEmpty=False)
 
-    def cancelWshEventData(self, reqId):
+    def cancelWshEventData(self, reqId: int) -> None:
         self.send(103, reqId)
 
-    def reqUserInfo(self, reqId):
+    def reqUserInfo(self, reqId: int) -> None:
         self.send(104, reqId)

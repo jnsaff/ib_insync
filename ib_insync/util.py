@@ -4,13 +4,15 @@ import asyncio
 import datetime as dt
 import logging
 import math
+import os
 import signal
 import sys
 import time
 import warnings
+from collections.abc import (
+    AsyncIterator, Awaitable, Callable, Iterable, Iterator)
 from dataclasses import fields, is_dataclass
-from typing import (
-    AsyncIterator, Awaitable, Callable, Iterator, List, Optional, Union)
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import eventkit as ev
@@ -51,10 +53,10 @@ EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
 UNSET_INTEGER = 2 ** 31 - 1
 UNSET_DOUBLE = sys.float_info.max
 
-Time_t = Union[dt.time, dt.datetime]
+Time_t = dt.time | dt.datetime
 
 
-def df(objs, labels: Optional[List[str]] = None):
+def df(objs: Iterable[Any], labels: list[str] | None = None) -> Any:
     """
     Create pandas DataFrame from the sequence of same-type objects.
 
@@ -86,7 +88,7 @@ def df(objs, labels: Optional[List[str]] = None):
     return df
 
 
-def dataclassAsDict(obj) -> dict:
+def dataclassAsDict(obj: Any) -> dict[str, Any]:
     """
     Return dataclass values as ``dict``.
     This is a non-recursive variant of ``dataclasses.asdict``.
@@ -96,7 +98,7 @@ def dataclassAsDict(obj) -> dict:
     return {field.name: getattr(obj, field.name) for field in fields(obj)}
 
 
-def dataclassAsTuple(obj) -> tuple:
+def dataclassAsTuple(obj: Any) -> tuple[Any, ...]:
     """
     Return dataclass values as ``tuple``.
     This is a non-recursive variant of ``dataclasses.astuple``.
@@ -106,7 +108,7 @@ def dataclassAsTuple(obj) -> tuple:
     return tuple(getattr(obj, field.name) for field in fields(obj))
 
 
-def dataclassNonDefaults(obj) -> dict:
+def dataclassNonDefaults(obj: Any) -> dict[str, Any]:
     """
     For a ``dataclass`` instance get the fields that are different from the
     default values and return as ``dict``.
@@ -121,7 +123,7 @@ def dataclassNonDefaults(obj) -> dict:
         and not (isinstance(value, list) and value == [])}
 
 
-def dataclassUpdate(obj, *srcObjs, **kwargs) -> object:
+def dataclassUpdate(obj: Any, *srcObjs: Any, **kwargs: Any) -> Any:
     """
     Update fields of the given ``dataclass`` object from zero or more
     ``dataclass`` source objects and/or from keyword arguments.
@@ -134,7 +136,7 @@ def dataclassUpdate(obj, *srcObjs, **kwargs) -> object:
     return obj
 
 
-def dataclassRepr(obj) -> str:
+def dataclassRepr(obj: Any) -> str:
     """
     Provide a culled representation of the given ``dataclass`` instance,
     showing only the fields with a non-default value.
@@ -145,7 +147,7 @@ def dataclassRepr(obj) -> str:
     return f'{clsName}({kwargs})'
 
 
-def isnamedtupleinstance(x):
+def isnamedtupleinstance(x: Any) -> bool:
     """From https://stackoverflow.com/a/2166841/6067848"""
     t = type(x)
     b = t.__bases__
@@ -157,7 +159,7 @@ def isnamedtupleinstance(x):
     return all(type(n) is str for n in f)
 
 
-def tree(obj):
+def tree(obj: Any) -> Any:
     """
     Convert object to a tree of lists, dicts and simple values.
     The result can be serialized to JSON.
@@ -180,7 +182,9 @@ def tree(obj):
         return str(obj)
 
 
-def barplot(bars, title='', upColor='blue', downColor='red'):
+def barplot(
+        bars: Any, title: str = '',
+        upColor: str = 'blue', downColor: str = 'red') -> Any:
     """
     Create candlestick plot for the given bars. The bars can be given as
     a DataFrame or as a list of bar objects.
@@ -236,12 +240,13 @@ def barplot(bars, title='', upColor='blue', downColor='red'):
     return fig
 
 
-def allowCtrlC():
+def allowCtrlC() -> None:
     """Allow Control-C to end program."""
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
-def logToFile(path, level=logging.INFO):
+def logToFile(
+        path: str | os.PathLike[str], level: int = logging.INFO) -> None:
     """Create a log handler that logs to the given file."""
     logger = logging.getLogger()
     if logger.handlers:
@@ -255,7 +260,7 @@ def logToFile(path, level=logging.INFO):
     logger.addHandler(handler)
 
 
-def logToConsole(level=logging.INFO):
+def logToConsole(level: int = logging.INFO) -> None:
     """Create a log handler that logs to the console."""
     logger = logging.getLogger()
     stdHandlers = [
@@ -313,17 +318,17 @@ def formatSI(n: float) -> str:
 class timeit:
     """Context manager for timing."""
 
-    def __init__(self, title='Run'):
+    def __init__(self, title: str = 'Run') -> None:
         self.title = title
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.t0 = time.time()
 
-    def __exit__(self, *_args):
+    def __exit__(self, *_args: object) -> None:
         print(self.title + ' took ' + formatSI(time.time() - self.t0) + 's')
 
 
-def run(*awaitables: Awaitable, timeout: Optional[float] = None):
+def run(*awaitables: Awaitable[Any], timeout: float | None = None) -> Any:
     """
     By default run the event loop forever.
 
@@ -340,9 +345,9 @@ def run(*awaitables: Awaitable, timeout: Optional[float] = None):
     loop = getLoop()
     if not awaitables:
         if loop.is_running():
-            return
+            return None
         loop.run_forever()
-        result = None
+        result: Any = None
         all_tasks = asyncio.all_tasks(loop)
         if all_tasks:
             # cancel pending tasks
@@ -354,16 +359,16 @@ def run(*awaitables: Awaitable, timeout: Optional[float] = None):
                 pass
     else:
         if len(awaitables) == 1:
-            future = awaitables[0]
+            future: Awaitable[Any] = awaitables[0]
         else:
             future = asyncio.gather(*awaitables)
         if timeout:
             future = asyncio.wait_for(future, timeout)
         task = asyncio.ensure_future(future, loop=loop)
 
-        err: Optional[BaseException] = None
+        err: BaseException | None = None
 
-        def onError(e):
+        def onError(e: BaseException) -> None:
             nonlocal err
             err = e
             task.cancel()
@@ -388,7 +393,9 @@ def _fillDate(time: Time_t) -> dt.datetime:
     return t
 
 
-def schedule(time: Time_t, callback: Callable, *args):
+def schedule(
+        time: Time_t, callback: Callable[..., Any],
+        *args: Any) -> asyncio.TimerHandle:
     """
     Schedule the callback to be run at the given time with
     the given arguments.
@@ -493,7 +500,7 @@ async def waitUntilAsync(t: Time_t) -> bool:
     return True
 
 
-def patchAsyncio():
+def patchAsyncio() -> None:
     """Patch asyncio to allow nested event loops."""
     import nest_asyncio
     nest_asyncio.apply(getLoop())
@@ -505,7 +512,7 @@ def getLoop() -> asyncio.AbstractEventLoop:
         return asyncio.get_running_loop()
     except RuntimeError:
         pass
-    loop: Optional[asyncio.AbstractEventLoop]
+    loop: asyncio.AbstractEventLoop | None
     if sys.version_info >= (3, 14):
         try:
             loop = asyncio.get_event_loop()
@@ -524,12 +531,15 @@ def getLoop() -> asyncio.AbstractEventLoop:
     return loop
 
 
-def startLoop():
+def startLoop() -> None:
     """Use nested asyncio event loop for Jupyter notebooks."""
     patchAsyncio()
 
 
-def useQt(qtLib: str = 'PyQt5', period: float = 0.01):
+qApp: Any = None
+
+
+def useQt(qtLib: str = 'PyQt5', period: float = 0.01) -> None:
     """
     Run combined Qt5/asyncio event loop.
 
@@ -542,7 +552,7 @@ def useQt(qtLib: str = 'PyQt5', period: float = 0.01):
           * PySide6
         period: Period in seconds to poll Qt.
     """
-    def qt_step():
+    def qt_step() -> None:
         loop.call_later(period, qt_step)
         if not stack:
             qloop = qc.QEventLoop()
@@ -554,7 +564,7 @@ def useQt(qtLib: str = 'PyQt5', period: float = 0.01):
         qloop.exec() if qtLib == 'PyQt6' else qloop.exec_()
         timer.stop()
         stack.append((qloop, timer))
-        qApp.processEvents()  # type: ignore
+        qApp.processEvents()
 
     if qtLib not in ('PyQt5', 'PyQt6', 'PySide2', 'PySide6'):
         raise RuntimeError(f'Unknown Qt library: {qtLib}')
@@ -562,14 +572,14 @@ def useQt(qtLib: str = 'PyQt5', period: float = 0.01):
     qc = import_module(qtLib + '.QtCore')
     qw = import_module(qtLib + '.QtWidgets')
     global qApp
-    qApp = (qw.QApplication.instance()     # type: ignore
-            or qw.QApplication(sys.argv))  # type: ignore
+    qApp = (qw.QApplication.instance()
+            or qw.QApplication(sys.argv))
     loop = getLoop()
-    stack: list = []
+    stack: list[Any] = []
     qt_step()
 
 
-def formatIBDatetime(t: Union[dt.date, dt.datetime, str, None]) -> str:
+def formatIBDatetime(t: dt.date | dt.datetime | str | None) -> str:
     """Format date or datetime to string that IB uses."""
     if not t:
         s = ''
@@ -586,7 +596,7 @@ def formatIBDatetime(t: Union[dt.date, dt.datetime, str, None]) -> str:
     return s
 
 
-def parseIBDatetime(s: str) -> Union[dt.date, dt.datetime]:
+def parseIBDatetime(s: str) -> dt.date | dt.datetime:
     """Parse string in IB date or datetime format to datetime."""
     if not isinstance(s, str):
         raise TypeError(
@@ -600,7 +610,7 @@ def parseIBDatetime(s: str) -> Union[dt.date, dt.datetime]:
             y = int(cleaned[0:4])
             m = int(cleaned[4:6])
             d = int(cleaned[6:8])
-            t: Union[dt.date, dt.datetime] = dt.date(y, m, d)
+            t: dt.date | dt.datetime = dt.date(y, m, d)
         elif cleaned.isdigit():
             t = dt.datetime.fromtimestamp(int(cleaned), dt.timezone.utc)
         else:

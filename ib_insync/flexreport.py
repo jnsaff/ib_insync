@@ -6,7 +6,7 @@ import time
 import xml.etree.ElementTree as et
 from contextlib import suppress
 from pathlib import Path
-from typing import Union
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import urlopen
@@ -39,7 +39,7 @@ class FlexError(Exception):
     pass
 
 
-def _validate_param(name: str, value: Union[str, int]) -> str:
+def _validate_param(name: str, value: str | int) -> str:
     """Validate and normalize a Flex Web Service parameter."""
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise ValueError(f'{name} must be a non-empty string or integer')
@@ -80,7 +80,8 @@ def _fetch_url(url: str, timeout: float) -> bytes:
     """Fetch a validated HTTPS Flex URL without leaking sensitive tokens."""
     try:
         with urlopen(url, timeout=timeout) as resp:
-            return resp.read()
+            data: bytes = resp.read()
+            return data
     except HTTPError as err:
         code, reason = err.code, err.reason
         err.close()
@@ -115,7 +116,10 @@ class FlexReport:
     data: bytes
     root: et.Element
 
-    def __init__(self, token=None, queryId=None, path=None):
+    def __init__(
+            self, token: str | int | None = None,
+            queryId: str | int | None = None,
+            path: str | os.PathLike[str] | None = None) -> None:
         """
         Download a report by giving a valid ``token`` and ``queryId``,
         or load from file by giving a valid ``path``.
@@ -129,11 +133,11 @@ class FlexReport:
         elif path is not None:
             self.load(path)
 
-    def topics(self):
+    def topics(self) -> set[str]:
         """Get the set of topics that can be extracted from this report."""
         return set(node.tag for node in self.root.iter() if node.attrib)
 
-    def extract(self, topic: str, parseNumbers=True) -> list:
+    def extract(self, topic: str, parseNumbers: bool = True) -> list[Any]:
         """
         Extract items of given topic and return as list of objects.
 
@@ -151,12 +155,13 @@ class FlexReport:
                         d[k] = int(v)
         return results
 
-    def df(self, topic: str, parseNumbers=True):
+    def df(self, topic: str, parseNumbers: bool = True) -> Any:
         """Same as extract but return the result as a pandas DataFrame."""
         return util.df(self.extract(topic, parseNumbers))
 
-    def download(self, token, queryId, timeout: float = 30,
-                 maxRetries: int = 60):
+    def download(
+            self, token: str | int, queryId: str | int,
+            timeout: float = 30, maxRetries: int = 60) -> None:
         """Download report for the given ``token`` and ``queryId``."""
         token_str = _validate_param('token', token)
         query_id_str = _validate_param('queryId', queryId)
@@ -206,7 +211,7 @@ class FlexReport:
             return
         raise FlexError('Timed out waiting for statement generation')
 
-    def load(self, path):
+    def load(self, path: str | os.PathLike[str]) -> None:
         """Load report from XML file."""
         file_path = Path(path)
         if not str(path).strip():
@@ -216,7 +221,7 @@ class FlexReport:
         self.root = _parse_xml(data)
         self.data = data
 
-    def save(self, path):
+    def save(self, path: str | os.PathLike[str]) -> None:
         """Save report to XML file."""
         file_path = Path(path)
         if not str(path).strip():

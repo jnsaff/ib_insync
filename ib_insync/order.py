@@ -1,7 +1,7 @@
 """Order types used by Interactive Brokers."""
 
 from dataclasses import dataclass, field
-from typing import ClassVar, FrozenSet, List, NamedTuple
+from typing import Any, ClassVar, NamedTuple, Self
 
 from eventkit import Event
 
@@ -105,15 +105,15 @@ class Order:
     clearingAccount: str = ''
     clearingIntent: str = ''
     algoStrategy: str = ''
-    algoParams: List[TagValue] = field(default_factory=list)
-    smartComboRoutingParams: List[TagValue] = field(default_factory=list)
+    algoParams: list[TagValue] = field(default_factory=list)
+    smartComboRoutingParams: list[TagValue] = field(default_factory=list)
     algoId: str = ''
     whatIf: bool = False
     notHeld: bool = False
     solicited: bool = False
     modelCode: str = ''
-    orderComboLegs: List['OrderComboLeg'] = field(default_factory=list)
-    orderMiscOptions: List[TagValue] = field(default_factory=list)
+    orderComboLegs: list['OrderComboLeg'] = field(default_factory=list)
+    orderMiscOptions: list[TagValue] = field(default_factory=list)
     referenceContractId: int = 0
     peggedChangeAmount: float = 0.0
     isPeggedChangeAmountDecrease: bool = False
@@ -126,7 +126,7 @@ class Order:
     adjustedTrailingAmount: float = UNSET_DOUBLE
     adjustableTrailingUnit: int = 0
     lmtPriceOffset: float = UNSET_DOUBLE
-    conditions: List['OrderCondition'] = field(default_factory=list)
+    conditions: list['OrderCondition'] = field(default_factory=list)
     conditionsCancelOrder: bool = False
     conditionsIgnoreRth: bool = False
     extOperator: str = ''
@@ -158,7 +158,7 @@ class Order:
     midOffsetAtWhole: float = UNSET_DOUBLE
     midOffsetAtHalf: float = UNSET_DOUBLE
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         attrs = dataclassNonDefaults(self)
         if self.__class__ is not Order:
             attrs.pop('orderType', None)
@@ -171,17 +171,18 @@ class Order:
 
     __str__ = __repr__
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return self is other
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return id(self)
 
 
 class LimitOrder(Order):
 
-    def __init__(self, action: str, totalQuantity: float, lmtPrice: float,
-                 **kwargs):
+    def __init__(
+            self, action: str, totalQuantity: float, lmtPrice: float,
+            **kwargs: Any) -> None:
         Order.__init__(
             self, orderType='LMT', action=action,
             totalQuantity=totalQuantity, lmtPrice=lmtPrice, **kwargs)
@@ -189,7 +190,8 @@ class LimitOrder(Order):
 
 class MarketOrder(Order):
 
-    def __init__(self, action: str, totalQuantity: float, **kwargs):
+    def __init__(
+            self, action: str, totalQuantity: float, **kwargs: Any) -> None:
         Order.__init__(
             self, orderType='MKT', action=action,
             totalQuantity=totalQuantity, **kwargs)
@@ -197,8 +199,9 @@ class MarketOrder(Order):
 
 class StopOrder(Order):
 
-    def __init__(self, action: str, totalQuantity: float, stopPrice: float,
-                 **kwargs):
+    def __init__(
+            self, action: str, totalQuantity: float, stopPrice: float,
+            **kwargs: Any) -> None:
         Order.__init__(
             self, orderType='STP', action=action,
             totalQuantity=totalQuantity, auxPrice=stopPrice, **kwargs)
@@ -206,8 +209,9 @@ class StopOrder(Order):
 
 class StopLimitOrder(Order):
 
-    def __init__(self, action: str, totalQuantity: float, lmtPrice: float,
-                 stopPrice: float, **kwargs):
+    def __init__(
+            self, action: str, totalQuantity: float, lmtPrice: float,
+            stopPrice: float, **kwargs: Any) -> None:
         Order.__init__(
             self, orderType='STP LMT', action=action,
             totalQuantity=totalQuantity, lmtPrice=lmtPrice,
@@ -238,9 +242,9 @@ class OrderStatus:
     Filled: ClassVar[str] = 'Filled'
     Inactive: ClassVar[str] = 'Inactive'
 
-    DoneStates: ClassVar[FrozenSet[str]] = frozenset(
+    DoneStates: ClassVar[frozenset[str]] = frozenset(
         ['Filled', 'Cancelled', 'ApiCancelled'])
-    ActiveStates: ClassVar[FrozenSet[str]] = frozenset(
+    ActiveStates: ClassVar[frozenset[str]] = frozenset(
         ['PendingSubmit', 'ApiPending', 'PreSubmitted', 'Submitted'])
 
 
@@ -289,16 +293,16 @@ class Trade:
     contract: Contract = field(default_factory=Contract)
     order: Order = field(default_factory=Order)
     orderStatus: 'OrderStatus' = field(default_factory=OrderStatus)
-    fills: List[Fill] = field(default_factory=list)
-    log: List[TradeLogEntry] = field(default_factory=list)
+    fills: list[Fill] = field(default_factory=list)
+    log: list[TradeLogEntry] = field(default_factory=list)
     advancedError: str = ''
 
-    events: ClassVar = (
+    events: ClassVar[tuple[str, ...]] = (
         'statusEvent', 'modifyEvent', 'fillEvent',
         'commissionReportEvent', 'filledEvent',
         'cancelEvent', 'cancelledEvent')
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.statusEvent = Event('statusEvent')
         self.modifyEvent = Event('modifyEvent')
         self.fillEvent = Event('fillEvent')
@@ -336,10 +340,12 @@ class BracketOrder(NamedTuple):
 
 @dataclass
 class OrderCondition:
+    condType: int = 0
+    conjunction: str = 'a'
 
     @staticmethod
-    def createClass(condType):
-        d = {
+    def createClass(condType: int) -> type[Any]:
+        d: dict[int, type[OrderCondition]] = {
             1: PriceCondition,
             3: TimeCondition,
             4: MarginCondition,
@@ -348,11 +354,11 @@ class OrderCondition:
             7: PercentChangeCondition}
         return d[condType]
 
-    def And(self):
+    def And(self) -> Self:
         self.conjunction = 'a'
         return self
 
-    def Or(self):
+    def Or(self) -> Self:
         self.conjunction = 'o'
         return self
 

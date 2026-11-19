@@ -5,9 +5,10 @@ import copy
 import datetime
 import logging
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import (
-    AsyncIterator, Awaitable, Dict, Iterator, List, Optional, Union)
+    Any, Dict, List, Optional, Self, TypeVar, Union, cast, overload)
 
 from eventkit import Event
 
@@ -17,14 +18,17 @@ from ib_insync.contract import Contract, ContractDescription, ContractDetails
 from ib_insync.objects import (
     AccountValue, BarDataList, DepthMktDataDescription, Execution,
     ExecutionFilter, Fill, HistogramData, HistoricalNews, HistoricalSchedule,
-    NewsArticle, NewsBulletin, NewsProvider, NewsTick, OptionChain,
-    OptionComputation, PnL, PnLSingle, PortfolioItem, Position, PriceIncrement,
-    RealTimeBarList, ScanDataList, ScannerSubscription, SmartComponent,
-    TagValue, TradeLogEntry, WshEventData)
+    HistoricalTick, HistoricalTickBidAsk, HistoricalTickLast, NewsArticle,
+    NewsBulletin, NewsProvider, NewsTick, OptionChain, OptionComputation, PnL,
+    PnLSingle, PortfolioItem, Position, PriceIncrement, RealTimeBarList,
+    ScanDataList, ScannerSubscription, SmartComponent, TagValue,
+    TradeLogEntry, WshEventData)
 from ib_insync.order import (
     BracketOrder, LimitOrder, Order, OrderState, OrderStatus, StopOrder, Trade)
 from ib_insync.ticker import Ticker
 from ib_insync.wrapper import Wrapper
+
+_T = TypeVar('_T')
 
 
 class IB:
@@ -206,7 +210,7 @@ class IB:
     MaxSyncedSubAccounts: int = 50
     TimezoneTWS: str = ''
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._createEvents()
         self.wrapper = Wrapper(self)
         self.client = Client(self.wrapper)
@@ -214,7 +218,7 @@ class IB:
         self.client.apiEnd += self.disconnectedEvent
         self._logger = logging.getLogger('ib_insync.ib')
 
-    def _createEvents(self):
+    def _createEvents(self) -> None:
         self.connectedEvent = Event('connectedEvent')
         self.disconnectedEvent = Event('disconnectedEvent')
         self.updateEvent = Event('updateEvent')
@@ -241,20 +245,20 @@ class IB:
         self.errorEvent = Event('errorEvent')
         self.timeoutEvent = Event('timeoutEvent')
 
-    def __del__(self):
+    def __del__(self) -> None:
         if hasattr(self, 'client'):
             self.disconnect()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_exc):
+    def __exit__(self, *_exc: object) -> None:
         self.disconnect()
 
-    async def __aenter__(self) -> 'IB':
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *_exc) -> None:
+    async def __aexit__(self, *_exc: object) -> None:
         self.disconnect()
 
     @asynccontextmanager
@@ -262,7 +266,7 @@ class IB:
             self, host: str = '127.0.0.1', port: int = 7497,
             clientId: int = 1, timeout: Optional[float] = 4,
             readonly: bool = False, account: str = '',
-            raiseSyncErrors: bool = False) -> AsyncIterator['IB']:
+            raiseSyncErrors: bool = False) -> AsyncIterator[Self]:
         """
         Async context manager that connects to TWS/IBG on entry and
         guarantees :meth:`.disconnect` on exit.
@@ -280,7 +284,7 @@ class IB:
         finally:
             self.disconnect()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         conn = (f'connected to {self.client.host}:'
                 f'{self.client.port} clientId={self.client.clientId}' if
                 self.client.isConnected() else 'not connected')
@@ -289,7 +293,7 @@ class IB:
     def connect(
             self, host: str = '127.0.0.1', port: int = 7497, clientId: int = 1,
             timeout: float = 4, readonly: bool = False, account: str = '',
-            raiseSyncErrors: bool = False):
+            raiseSyncErrors: bool = False) -> Self:
         """
         Connect to a running TWS or IB gateway application.
         After the connection is made the client is fully synchronized
@@ -316,7 +320,7 @@ class IB:
             host, port, clientId, timeout, readonly, account,
             raiseSyncErrors))
 
-    def disconnect(self):
+    def disconnect(self) -> None:
         """
         Disconnect from a TWS or IB gateway application.
         This will clear all session state.
@@ -342,14 +346,16 @@ class IB:
         """Is there an API connection to TWS or IB gateway?"""
         return self.client.isReady()
 
-    def _onError(self, reqId, errorCode, errorString, contract):
+    def _onError(
+            self, reqId: int, errorCode: int, errorString: str,
+            contract: Contract | None) -> None:
         if (errorCode == 1102 and self.wrapper.acctSummaryReqId
                 and self.client.isReady()):
             # "Connectivity between IB and Trader Workstation has been
             # restored": Resubscribe to account summary if active.
             task = asyncio.ensure_future(self.reqAccountSummaryAsync())
 
-            def _logTaskError(fut):
+            def _logTaskError(fut: asyncio.Future[Any]) -> None:
                 if not fut.cancelled():
                     exc = fut.exception()
                     if exc:
@@ -365,7 +371,15 @@ class IB:
     timeRangeAsync = staticmethod(util.timeRangeAsync)
     waitUntil = staticmethod(util.waitUntil)
 
-    def _run(self, *awaitables: Awaitable):
+    @overload
+    def _run(self, awaitable: Awaitable[_T], /) -> _T:
+        ...
+
+    @overload
+    def _run(self, *awaitables: Awaitable[Any]) -> Any:
+        ...
+
+    def _run(self, *awaitables: Awaitable[Any]) -> Any:
         return util.run(*awaitables, timeout=self.RequestTimeout)
 
     def waitOnUpdate(self, timeout: float = 0) -> bool:
@@ -398,7 +412,8 @@ class IB:
         return True
 
     def loopUntil(
-            self, condition=None, timeout: float = 0) -> Iterator[object]:
+            self, condition: Callable[[], object] | None = None,
+            timeout: float = 0) -> Iterator[object]:
         """
         Iterate until condition is met, with optional timeout in seconds.
         The yielded value is that of the condition or False when timed out.
@@ -431,7 +446,7 @@ class IB:
             else:
                 self.waitOnUpdate(0)
 
-    def setTimeout(self, timeout: float = 60):
+    def setTimeout(self, timeout: float = 60) -> None:
         """
         Set a timeout for receiving messages from TWS/IBG, emitting
         ``timeoutEvent`` if there is no incoming data for too long.
@@ -502,7 +517,7 @@ class IB:
             return [v for d in self.wrapper.positions.values()
                     for v in d.values()]
 
-    def pnl(self, account='', modelCode='') -> List[PnL]:
+    def pnl(self, account: str = '', modelCode: str = '') -> List[PnL]:
         """
         List of subscribed :class:`.PnL` objects (profit and loss),
         optionally filtered by account and/or modelCode.
@@ -636,7 +651,7 @@ class IB:
     def bracketOrder(
             self, action: str, quantity: float,
             limitPrice: float, takeProfitPrice: float,
-            stopLossPrice: float, **kwargs) -> BracketOrder:
+            stopLossPrice: float, **kwargs: Any) -> BracketOrder:
         """
         Create a limit order that is bracketed by a take-profit order and
         a stop-loss order. Submit the bracket like:
@@ -795,7 +810,7 @@ class IB:
             self._logger.error(f'cancelOrder: Unknown orderId {order.orderId}')
         return trade
 
-    def reqGlobalCancel(self):
+    def reqGlobalCancel(self) -> None:
         """
         Cancel all active trades including those placed by other
         clients or TWS/IB gateway.
@@ -811,7 +826,7 @@ class IB:
         """
         return self._run(self.reqCurrentTimeAsync())
 
-    def reqAccountUpdates(self, account: str = ''):
+    def reqAccountUpdates(self, account: str = '') -> None:
         """
         This is called at startup - no need to call again.
 
@@ -827,7 +842,7 @@ class IB:
         self._run(self.reqAccountUpdatesAsync(account))
 
     def reqAccountUpdatesMulti(
-            self, account: str = '', modelCode: str = ''):
+            self, account: str = '', modelCode: str = '') -> None:
         """
         It is recommended to use :meth:`.accountValues` instead.
 
@@ -841,7 +856,7 @@ class IB:
         """
         self._run(self.reqAccountUpdatesMultiAsync(account, modelCode))
 
-    def reqAccountSummary(self):
+    def reqAccountSummary(self) -> None:
         """
         It is recommended to use :meth:`.accountSummary` instead.
 
@@ -852,7 +867,7 @@ class IB:
         """
         self._run(self.reqAccountSummaryAsync())
 
-    def reqAutoOpenOrders(self, autoBind: bool = True):
+    def reqAutoOpenOrders(self, autoBind: bool = True) -> None:
         """
         Bind manual TWS orders so that they can be managed from this client.
         The clientId must be 0 and the TWS API setting "Use negative numbers
@@ -952,7 +967,7 @@ class IB:
         self.client.reqPnL(reqId, account, modelCode)
         return pnl
 
-    def cancelPnL(self, account, modelCode: str = ''):
+    def cancelPnL(self, account: str, modelCode: str = '') -> None:
         """
         Cancel PnL subscription.
 
@@ -1004,7 +1019,7 @@ class IB:
         return pnlSingle
 
     def cancelPnLSingle(
-            self, account: str, modelCode: str, conId: int):
+            self, account: str, modelCode: str, conId: int) -> None:
         """
         Cancel PnLSingle subscription for the given account, modelCode
         and conId.
@@ -1042,7 +1057,8 @@ class IB:
         """
         return self._run(self.reqContractDetailsAsync(contract))
 
-    def reqMatchingSymbols(self, pattern: str) -> List[ContractDescription]:
+    def reqMatchingSymbols(
+            self, pattern: str) -> Optional[List[ContractDescription]]:
         """
         Request contract descriptions of contracts that match a pattern.
 
@@ -1104,7 +1120,7 @@ class IB:
             reqId, contract, barSize, whatToShow, useRTH, realTimeBarsOptions)
         return bars
 
-    def cancelRealTimeBars(self, bars: RealTimeBarList):
+    def cancelRealTimeBars(self, bars: RealTimeBarList) -> None:
         """
         Cancel the realtime bars subscription.
 
@@ -1168,7 +1184,7 @@ class IB:
                 contract, endDateTime, durationStr, barSizeSetting, whatToShow,
                 useRTH, formatDate, keepUpToDate, chartOptions, timeout))
 
-    def cancelHistoricalData(self, bars: BarDataList):
+    def cancelHistoricalData(self, bars: BarDataList) -> None:
         """
         Cancel the update subscription for the historical bars.
 
@@ -1209,7 +1225,8 @@ class IB:
             endDateTime: Union[str, datetime.date],
             numberOfTicks: int, whatToShow: str, useRth: bool,
             ignoreSize: bool = False,
-            miscOptions: List[TagValue] = []) -> List:
+            miscOptions: List[TagValue] = []) -> List[
+                HistoricalTick | HistoricalTickBidAsk | HistoricalTickLast]:
         """
         Request historical ticks. The time resolution of the ticks
         is one second.
@@ -1240,7 +1257,7 @@ class IB:
                 contract, startDateTime, endDateTime, numberOfTicks,
                 whatToShow, useRth, ignoreSize, miscOptions))
 
-    def reqMarketDataType(self, marketDataType: int):
+    def reqMarketDataType(self, marketDataType: int) -> None:
         """
         Set the market data type used for :meth:`.reqMktData`.
 
@@ -1334,7 +1351,7 @@ class IB:
             regulatorySnapshot, mktDataOptions)
         return ticker
 
-    def cancelMktData(self, contract: Contract):
+    def cancelMktData(self, contract: Contract) -> None:
         """
         Unsubscribe from realtime streaming tick data.
 
@@ -1371,7 +1388,7 @@ class IB:
             reqId, contract, tickType, numberOfTicks, ignoreSize)
         return ticker
 
-    def cancelTickByTickData(self, contract: Contract, tickType: str):
+    def cancelTickByTickData(self, contract: Contract, tickType: str) -> None:
         """
         Unsubscribe from tick-by-tick data
 
@@ -1406,7 +1423,8 @@ class IB:
 
     def reqMktDepth(
             self, contract: Contract, numRows: int = 5,
-            isSmartDepth: bool = False, mktDepthOptions=None) -> Ticker:
+            isSmartDepth: bool = False,
+            mktDepthOptions: List[TagValue] | None = None) -> Ticker:
         """
         Subscribe to market depth data (a.k.a. DOM, L2 or order book).
 
@@ -1432,7 +1450,8 @@ class IB:
             reqId, contract, numRows, isSmartDepth, mktDepthOptions)
         return ticker
 
-    def cancelMktDepth(self, contract: Contract, isSmartDepth=False):
+    def cancelMktDepth(
+            self, contract: Contract, isSmartDepth: bool = False) -> None:
         """
         Unsubscribe from market depth data.
 
@@ -1545,7 +1564,7 @@ class IB:
             scannerSubscriptionFilterOptions)
         return dataList
 
-    def cancelScannerSubscription(self, dataList: ScanDataList):
+    def cancelScannerSubscription(self, dataList: ScanDataList) -> None:
         """
         Cancel market data subscription.
 
@@ -1569,7 +1588,8 @@ class IB:
     def calculateImpliedVolatility(
             self, contract: Contract,
             optionPrice: float, underPrice: float,
-            implVolOptions: List[TagValue] = []) -> OptionComputation:
+            implVolOptions: List[TagValue] = []) \
+            -> Optional[OptionComputation]:
         """
         Calculate the volatility given the option price.
 
@@ -1590,7 +1610,7 @@ class IB:
     def calculateOptionPrice(
             self, contract: Contract,
             volatility: float, underPrice: float,
-            optPrcOptions: List[TagValue] = []) -> OptionComputation:
+            optPrcOptions: List[TagValue] = []) -> Optional[OptionComputation]:
         """
         Calculate the option price given the volatility.
 
@@ -1634,7 +1654,7 @@ class IB:
 
     def exerciseOptions(
             self, contract: Contract, exerciseAction: int,
-            exerciseQuantity: int, account: str, override: int):
+            exerciseQuantity: int, account: str, override: int) -> None:
         """
         Exercise an options contract.
 
@@ -1717,7 +1737,7 @@ class IB:
                 conId, providerCodes, startDateTime, endDateTime,
                 totalResults, historicalNewsOptions))
 
-    def reqNewsBulletins(self, allMessages: bool):
+    def reqNewsBulletins(self, allMessages: bool) -> None:
         """
         Subscribe to IB news bulletins.
 
@@ -1728,11 +1748,11 @@ class IB:
         """
         self.client.reqNewsBulletins(allMessages)
 
-    def cancelNewsBulletins(self):
+    def cancelNewsBulletins(self) -> None:
         """Cancel subscription to IB news bulletins."""
         self.client.cancelNewsBulletins()
 
-    def requestFA(self, faDataType: int):
+    def requestFA(self, faDataType: int) -> str | None:
         """
         Requests to change the FA configuration.
 
@@ -1752,7 +1772,7 @@ class IB:
         """
         return self._run(self.requestFAAsync(faDataType))
 
-    def replaceFA(self, faDataType: int, xml: str):
+    def replaceFA(self, faDataType: int, xml: str) -> None:
         """
         Replaces Financial Advisor's settings.
 
@@ -1763,7 +1783,7 @@ class IB:
         reqId = self.client.getReqId()
         self.client.replaceFA(reqId, faDataType, xml)
 
-    def reqWshMetaData(self):
+    def reqWshMetaData(self) -> None:
         """
         Request Wall Street Horizon metadata.
 
@@ -1776,7 +1796,7 @@ class IB:
             self.wrapper.wshMetaReqId = reqId
             self.client.reqWshMetaData(reqId)
 
-    def cancelWshMetaData(self):
+    def cancelWshMetaData(self) -> None:
         """Cancel WSH metadata."""
         reqId = self.wrapper.wshMetaReqId
         if not reqId:
@@ -1785,7 +1805,7 @@ class IB:
             self.client.cancelWshMetaData(reqId)
             self.wrapper.wshMetaReqId = 0
 
-    def reqWshEventData(self, data: WshEventData):
+    def reqWshEventData(self, data: WshEventData) -> None:
         """
         Request Wall Street Horizon event data.
 
@@ -1804,7 +1824,7 @@ class IB:
             self.wrapper.wshEventReqId = reqId
             self.client.reqWshEventData(reqId, data)
 
-    def cancelWshEventData(self):
+    def cancelWshEventData(self) -> None:
         """Cancel active WHS event data."""
         reqId = self.wrapper.wshEventReqId
         if not reqId:
@@ -1870,7 +1890,7 @@ class IB:
             self, host: str = '127.0.0.1', port: int = 7497,
             clientId: int = 1, timeout: Optional[float] = 4,
             readonly: bool = False, account: str = '',
-            raiseSyncErrors: bool = False):
+            raiseSyncErrors: bool = False) -> Self:
         if isinstance(clientId, bool):
             raise ValueError(f'Invalid clientId: {clientId!r}')
         clientId = int(clientId)
@@ -1894,7 +1914,7 @@ class IB:
                 account = accounts[0]
 
             # prepare initializing requests
-            reqs: Dict = {}  # name -> request
+            reqs: Dict[str, Awaitable[Any]] = {}  # name -> request
             reqs['positions'] = self.reqPositionsAsync()
             if not readonly:
                 reqs['open orders'] = self.reqOpenOrdersAsync()
@@ -2097,7 +2117,7 @@ class IB:
         self.client.reqMatchingSymbols(reqId, pattern)
         try:
             await asyncio.wait_for(future, 4)
-            return future.result()
+            return cast(Optional[List[ContractDescription]], future.result())
         except asyncio.TimeoutError:
             self.wrapper._endReq(reqId)
             self._logger.error('reqMatchingSymbolsAsync: Timeout')
@@ -2110,7 +2130,7 @@ class IB:
         try:
             self.client.reqMarketRule(marketRuleId)
             await asyncio.wait_for(future, 1)
-            return future.result()
+            return cast(Optional[List[PriceIncrement]], future.result())
         except asyncio.TimeoutError:
             self.wrapper._endReq(key)
             self._logger.error('reqMarketRuleAsync: Timeout')
@@ -2174,7 +2194,8 @@ class IB:
             endDateTime: Union[str, datetime.date],
             numberOfTicks: int, whatToShow: str, useRth: bool,
             ignoreSize: bool = False,
-            miscOptions: List[TagValue] = []) -> Awaitable[List]:
+            miscOptions: List[TagValue] = []) -> Awaitable[List[
+                HistoricalTick | HistoricalTickBidAsk | HistoricalTickLast]]:
         reqId = self.client.getReqId()
         future = self.wrapper.startReq(reqId, contract)
         start = util.formatIBDatetime(startDateTime)
@@ -2193,11 +2214,12 @@ class IB:
             reqId, contract, whatToShow, useRTH, formatDate)
         try:
             await future
-            return future.result()
+            return cast(datetime.datetime, future.result())
         finally:
             self.client.cancelHeadTimeStamp(reqId)
 
-    def reqSmartComponentsAsync(self, bboExchange):
+    def reqSmartComponentsAsync(
+            self, bboExchange: str) -> Awaitable[List[SmartComponent]]:
         reqId = self.client.getReqId()
         future = self.wrapper.startReq(reqId)
         self.client.reqSmartComponents(reqId, bboExchange)
@@ -2238,7 +2260,7 @@ class IB:
         future = self.wrapper.startReq(dataList.reqId, container=dataList)
         try:
             await future
-            return future.result()
+            return cast(ScanDataList, future.result())
         finally:
             self.cancelScannerSubscription(dataList)
 
@@ -2258,7 +2280,7 @@ class IB:
             reqId, contract, optionPrice, underPrice, implVolOptions)
         try:
             await asyncio.wait_for(future, 4)
-            return future.result()
+            return cast(Optional[OptionComputation], future.result())
         except asyncio.TimeoutError:
             self.wrapper._endReq(reqId)
             self._logger.error('calculateImpliedVolatilityAsync: Timeout')
@@ -2276,7 +2298,7 @@ class IB:
             reqId, contract, volatility, underPrice, optPrcOptions)
         try:
             await asyncio.wait_for(future, 4)
-            return future.result()
+            return cast(Optional[OptionComputation], future.result())
         except asyncio.TimeoutError:
             self.wrapper._endReq(reqId)
             self._logger.error('calculateOptionPriceAsync: Timeout')
@@ -2326,21 +2348,22 @@ class IB:
             totalResults, historicalNewsOptions)
         try:
             await asyncio.wait_for(future, 4)
-            return future.result()
+            return cast(Optional[List[HistoricalNews]], future.result())
         except asyncio.TimeoutError:
             self.wrapper._endReq(reqId)
             self._logger.error('reqHistoricalNewsAsync: Timeout')
             return None
 
-    async def requestFAAsync(self, faDataType: int):
+    async def requestFAAsync(self, faDataType: int) -> str | None:
         future = self.wrapper.startReq('requestFA')
         self.client.requestFA(faDataType)
         try:
             await asyncio.wait_for(future, 4)
-            return future.result()
+            return cast(str, future.result())
         except asyncio.TimeoutError:
             self.wrapper._endReq('requestFA')
             self._logger.error('requestFAAsync: Timeout')
+            return None
 
     async def getWshMetaDataAsync(self) -> str:
         if self.wrapper.wshMetaReqId:
@@ -2349,7 +2372,7 @@ class IB:
         future = self.wrapper.startReq(
             self.wrapper.wshMetaReqId, container='')
         await future
-        return future.result()
+        return cast(str, future.result())
 
     async def getWshEventDataAsync(self, data: WshEventData) -> str:
         if self.wrapper.wshEventReqId:
@@ -2359,11 +2382,11 @@ class IB:
             self.wrapper.wshEventReqId, container='')
         try:
             await future
-            return future.result()
+            return cast(str, future.result())
         finally:
             self.cancelWshEventData()
 
-    def reqUserInfoAsync(self):
+    def reqUserInfoAsync(self) -> Awaitable[str]:
         reqId = self.client.getReqId()
         future = self.wrapper.startReq(reqId)
         self.client.reqUserInfo(reqId)

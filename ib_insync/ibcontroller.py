@@ -5,7 +5,7 @@ import logging
 import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar, Self
 
 from eventkit import Event
 
@@ -81,7 +81,7 @@ class IBC:
         IB.run()
     """
 
-    IbcLogLevel: ClassVar = logging.DEBUG
+    IbcLogLevel: ClassVar[int] = logging.DEBUG
 
     twsVersion: int = 0
     gateway: bool = False
@@ -97,30 +97,30 @@ class IBC:
     fixpassword: str = ''
     on2fatimeout: str = ''
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._isWindows = sys.platform == 'win32'
         if not self.ibcPath:
             self.ibcPath = '/opt/ibc' if not self._isWindows else 'C:\\IBC'
-        self._proc = None
-        self._monitor = None
+        self._proc: asyncio.subprocess.Process | None = None
+        self._monitor: asyncio.Future[None] | None = None
         self._logger = logging.getLogger('ib_insync.IBC')
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         self.start()
         return self
 
-    def __exit__(self, *_exc):
+    def __exit__(self, *_exc: object) -> None:
         self.terminate()
 
-    def start(self):
+    def start(self) -> None:
         """Launch TWS/IBG."""
         util.run(self.startAsync())
 
-    def terminate(self):
+    def terminate(self) -> None:
         """Terminate TWS/IBG."""
         util.run(self.terminateAsync())
 
-    async def startAsync(self):
+    async def startAsync(self) -> None:
         if self._proc:
             return
         self._logger.info('Starting')
@@ -161,7 +161,7 @@ class IBC:
             *cmd, stdout=asyncio.subprocess.PIPE)
         self._monitor = asyncio.ensure_future(self.monitorAsync())
 
-    async def terminateAsync(self):
+    async def terminateAsync(self) -> None:
         if not self._proc:
             return
         self._logger.info('Terminating')
@@ -179,8 +179,8 @@ class IBC:
                 await self._proc.wait()
         self._proc = None
 
-    async def monitorAsync(self):
-        while self._proc:
+    async def monitorAsync(self) -> None:
+        while self._proc and self._proc.stdout:
             line = await self._proc.stdout.readline()
             if not line:
                 break
@@ -246,7 +246,7 @@ class Watchdog:
         * ``hardTimeoutEvent`` (watchdog: :class:`.Watchdog`)
     """
 
-    events = [
+    events: ClassVar[list[str]] = [
         'startingEvent', 'startedEvent', 'stoppingEvent', 'stoppedEvent',
         'softTimeoutEvent', 'hardTimeoutEvent']
 
@@ -265,7 +265,7 @@ class Watchdog:
     probeContract: Contract = field(default_factory=lambda: Forex('EURUSD'))
     probeTimeout: float = 4
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.startingEvent = Event('startingEvent')
         self.startedEvent = Event('startedEvent')
         self.stoppingEvent = Event('stoppingEvent')
@@ -278,16 +278,16 @@ class Watchdog:
             raise ValueError('No IB instance supplied')
         if self.ib.isConnected():
             raise ValueError('IB instance must not be connected')
-        self._runner = None
+        self._runner: asyncio.Future[None] | None = None
         self._logger = logging.getLogger('ib_insync.Watchdog')
 
-    def start(self):
+    def start(self) -> asyncio.Future[None]:
         self._logger.info('Starting')
         self.startingEvent.emit(self)
         self._runner = asyncio.ensure_future(self.runAsync())
         return self._runner
 
-    def stop(self):
+    def stop(self) -> None:
         self._logger.info('Stopping')
         self.stoppingEvent.emit(self)
         runner = self._runner
@@ -296,17 +296,19 @@ class Watchdog:
         if runner and not runner.done():
             runner.cancel()
 
-    async def runAsync(self):
+    async def runAsync(self) -> None:
 
-        def onTimeout(idlePeriod):
+        def onTimeout(idlePeriod: float) -> None:
             if not waiter.done():
                 waiter.set_result(None)
 
-        def onError(reqId, errorCode, errorString, contract):
+        def onError(
+                reqId: int, errorCode: int, errorString: str,
+                contract: Contract | None) -> None:
             if errorCode in {100, 1100} and not waiter.done():
                 waiter.set_exception(Warning(f'Error {errorCode}'))
 
-        def onDisconnected():
+        def onDisconnected() -> None:
             if not waiter.done():
                 waiter.set_exception(Warning('Disconnected'))
 
@@ -326,7 +328,7 @@ class Watchdog:
                 self.ib.disconnectedEvent += onDisconnected
 
                 while self._runner:
-                    waiter: asyncio.Future = asyncio.Future()
+                    waiter: asyncio.Future[Any] = asyncio.Future()
                     await waiter
                     # soft timeout, probe the app with a historical request
                     self._logger.debug('Soft timeout')
