@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sys
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 from eventkit import Event
@@ -153,7 +153,7 @@ class IBC:
                     cmd.append(f'{arg}{v}')
                 elif arg:
                     cmd.append(arg)
-                else:
+                elif k == 'twsVersion':
                     cmd.append(str(v))
 
         # run shell command
@@ -169,9 +169,10 @@ class IBC:
             self._monitor.cancel()
             self._monitor = None
         if self._isWindows:
-            import subprocess
-            subprocess.call(
-                ['taskkill', '/F', '/T', '/PID', str(self._proc.pid)])
+            killer = await asyncio.create_subprocess_exec(
+                'taskkill', '/F', '/T', '/PID', str(self._proc.pid))
+            await killer.wait()
+            await self._proc.wait()
         else:
             with suppress(ProcessLookupError):
                 self._proc.terminate()
@@ -183,7 +184,8 @@ class IBC:
             line = await self._proc.stdout.readline()
             if not line:
                 break
-            self._logger.log(IBC.IbcLogLevel, line.strip().decode())
+            self._logger.log(
+                IBC.IbcLogLevel, line.strip().decode(errors='replace'))
 
 
 @dataclass
@@ -260,7 +262,7 @@ class Watchdog:
     readonly: bool = False
     account: str = ''
     raiseSyncErrors: bool = False
-    probeContract: Contract = Forex('EURUSD')
+    probeContract: Contract = field(default_factory=lambda: Forex('EURUSD'))
     probeTimeout: float = 4
 
     def __post_init__(self):
@@ -288,8 +290,11 @@ class Watchdog:
     def stop(self):
         self._logger.info('Stopping')
         self.stoppingEvent.emit(self)
-        self.ib.disconnect()
+        runner = self._runner
         self._runner = None
+        self.ib.disconnect()
+        if runner and not runner.done():
+            runner.cancel()
 
     async def runAsync(self):
 
@@ -309,6 +314,8 @@ class Watchdog:
             try:
                 await self.controller.startAsync()
                 await asyncio.sleep(self.appStartupTime)
+                if not self._runner:
+                    break
                 await self.ib.connectAsync(
                     self.host, self.port, self.clientId, self.connectTimeout,
                     self.readonly, self.account, self.raiseSyncErrors)
@@ -335,6 +342,8 @@ class Watchdog:
                         raise Warning('Hard timeout')
                     self.ib.setTimeout(self.appTimeout)
 
+            except asyncio.CancelledError:
+                break
             except ConnectionRefusedError:
                 pass
             except Warning as w:

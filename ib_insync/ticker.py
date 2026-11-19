@@ -240,7 +240,7 @@ class Midpoints(Tickfilter):
     __slots__ = ()
 
     def on_source(self, ticker):
-        if ticker.ticks:
+        if ticker.ticks and ticker.hasBidAsk():
             self.emit(ticker.time, ticker.midpoint(), 0)
 
 
@@ -251,7 +251,7 @@ class Bar:
     high: float = nan
     low: float = nan
     close: float = nan
-    volume: int = 0
+    volume: float = 0.0
     count: int = 0
 
 
@@ -264,7 +264,7 @@ class BarList(List[Bar]):
     def __eq__(self, other):
         return self is other
 
-    def __hash__(self):
+    def __hash__(self):  # type: ignore[override]
         return id(self)
 
 
@@ -281,8 +281,10 @@ class TimeBars(Op):
         self.bars = BarList()
 
     def on_source(self, time, price, size):
-        if not self.bars:
+        if not self.bars or isNan(price):
             return
+        if isNan(size):
+            size = 0
         bar = self.bars[-1]
         if isNan(bar.open):
             bar.open = bar.high = bar.low = price
@@ -315,11 +317,17 @@ class TickBars(Op):
     bars: BarList
 
     def __init__(self, count, source=None):
+        if count <= 0:
+            raise ValueError('count must be > 0')
         Op.__init__(self, source)
         self._count = count
         self.bars = BarList()
 
     def on_source(self, time, price, size):
+        if isNan(price):
+            return
+        if isNan(size):
+            size = 0
         if not self.bars or self.bars[-1].count == self._count:
             bar = Bar(time, price, price, price, price, size, 1)
             self.bars.append(bar)
@@ -332,7 +340,7 @@ class TickBars(Op):
             bar.count += 1
         if bar.count == self._count:
             self.bars.updateEvent.emit(self.bars, True)
-            self.emit(self.bars)
+            self.emit(bar)
 
 
 class VolumeBars(Op):
@@ -342,11 +350,17 @@ class VolumeBars(Op):
     bars: BarList
 
     def __init__(self, volume, source=None):
+        if volume <= 0:
+            raise ValueError('volume must be > 0')
         Op.__init__(self, source)
         self._volume = volume
         self.bars = BarList()
 
     def on_source(self, time, price, size):
+        if isNan(price):
+            return
+        if isNan(size):
+            size = 0
         if not self.bars or self.bars[-1].volume >= self._volume:
             bar = Bar(time, price, price, price, price, size, 1)
             self.bars.append(bar)
@@ -359,4 +373,4 @@ class VolumeBars(Op):
             bar.count += 1
         if bar.volume >= self._volume:
             self.bars.updateEvent.emit(self.bars, True)
-            self.emit(self.bars)
+            self.emit(bar)

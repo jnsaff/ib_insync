@@ -2,6 +2,8 @@
 
 import dataclasses
 import logging
+import math
+import re
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -12,7 +14,7 @@ from .objects import (
     BarData, CommissionReport, DepthMktDataDescription, Execution, FamilyCode,
     HistogramData, HistoricalSession, HistoricalTick, HistoricalTickBidAsk,
     HistoricalTickLast, NewsProvider, PriceIncrement, SmartComponent,
-    SoftDollarTier, TagValue, TickAttribBidAsk, TickAttribLast)
+    SoftDollarTier, TagValue, TickAttrib, TickAttribBidAsk, TickAttribLast)
 from .order import Order, OrderComboLeg, OrderCondition, OrderState
 from .util import UNSET_DOUBLE, ZoneInfo, parseIBDatetime
 from .wrapper import Wrapper
@@ -206,19 +208,46 @@ class Decoder:
             if typ is str:
                 continue
             v = getattr(obj, field.name)
+            if not isinstance(v, str):
+                continue
             if typ is int:
                 setattr(obj, field.name, int(v) if v else field.default)
             elif typ is float:
-                setattr(obj, field.name, float(v) if v else field.default)
+                if not v:
+                    setattr(obj, field.name, field.default)
+                elif v == 'Infinite':
+                    setattr(obj, field.name, math.inf)
+                else:
+                    setattr(obj, field.name, float(v))
             elif typ is bool:
                 setattr(obj, field.name, bool(int(v)) if v else field.default)
 
     def priceSizeTick(self, fields):
-        _, _, reqId, tickType, price, size, _ = fields
+        _, _, reqId, tickType, price, size, attrib = fields
 
         if price:
-            self.wrapper.priceSizeTick(
-                int(reqId), int(tickType), float(price), float(size or 0))
+            reqIdInt = int(reqId)
+            tickTypeInt = int(tickType)
+            priceFloat = float(price)
+            sizeFloat = float(size or 0)
+            if hasattr(self.wrapper, 'priceSizeTick'):
+                self.wrapper.priceSizeTick(
+                    reqIdInt, tickTypeInt, priceFloat, sizeFloat)
+            else:
+                tickPrice = getattr(self.wrapper, 'tickPrice', None)
+                if tickPrice:
+                    mask = int(attrib or 0)
+                    ta = TickAttrib(
+                        canAutoExecute=bool(mask & 1),
+                        pastLimit=bool(mask & 2),
+                        preOpen=bool(mask & 4))
+                    tickPrice(reqIdInt, tickTypeInt, priceFloat, ta)
+                tickSize = getattr(self.wrapper, 'tickSize', None)
+                sizeTickType = {
+                    1: 0, 2: 3, 4: 5, 66: 69, 67: 70, 68: 71
+                }.get(tickTypeInt)
+                if tickSize and sizeTickType is not None and sizeFloat:
+                    tickSize(reqIdInt, sizeTickType, sizeFloat)
 
     def errorMsg(self, fields):
         _, _, reqId, errorCode, errorString, *fields = fields
@@ -332,7 +361,10 @@ class Decoder:
         if len(times) > 2:
             cd.timeZoneId = times[2]
 
-        cd.longName = cd.longName.encode().decode('unicode-escape')
+        cd.longName = re.sub(
+            r'\\u([0-9a-fA-F]{4})',
+            lambda m: chr(int(m.group(1), 16)),
+            cd.longName)
         self.parse(cd)
         self.parse(c)
         self.wrapper.contractDetails(int(reqId), cd)
@@ -530,10 +562,15 @@ class Decoder:
             gamma, vega, theta, undPrice = fields
 
         self.wrapper.tickOptionComputation(
-            int(reqId), int(tickTypeInt), int(tickAttrib),
-            float(impliedVol), float(delta), float(optPrice),
-            float(pvDividend), float(gamma), float(vega),
-            float(theta), float(undPrice))
+            int(reqId), int(tickTypeInt), int(tickAttrib or 0),
+            float(impliedVol) if impliedVol else -1.0,
+            float(delta) if delta else -2.0,
+            float(optPrice) if optPrice else -1.0,
+            float(pvDividend) if pvDividend else -1.0,
+            float(gamma) if gamma else -2.0,
+            float(vega) if vega else -2.0,
+            float(theta) if theta else -2.0,
+            float(undPrice) if undPrice else -1.0)
 
     def deltaNeutralValidation(self, fields):
         _, _, reqId, conId, delta, price = fields
@@ -610,7 +647,7 @@ class Decoder:
         strikes = [float(field) for field in fields[n + 1:]]
 
         self.wrapper.securityDefinitionOptionParameter(
-            int(reqId), exchange, underlyingConId, tradingClass,
+            int(reqId), exchange, int(underlyingConId or 0), tradingClass,
             multiplier, expirations, strikes)
 
     def softDollarTiers(self, fields):

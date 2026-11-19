@@ -98,7 +98,7 @@ class BarData:
     high: float = 0.0
     low: float = 0.0
     close: float = 0.0
-    volume: float = 0
+    volume: float = 0.0
     average: float = 0.0
     barCount: int = 0
 
@@ -181,7 +181,7 @@ class PnLSingle:
     dailyPnL: float = nan
     unrealizedPnL: float = nan
     realizedPnL: float = nan
-    position: int = 0
+    position: float = 0.0
     value: float = nan
 
 
@@ -424,7 +424,7 @@ class BarDataList(List[BarData]):
     def __eq__(self, other):
         return self is other
 
-    def __hash__(self):
+    def __hash__(self):  # type: ignore[override]
         return id(self)
 
 
@@ -452,7 +452,7 @@ class RealTimeBarList(List[RealTimeBar]):
     def __eq__(self, other):
         return self is other
 
-    def __hash__(self):
+    def __hash__(self):  # type: ignore[override]
         return id(self)
 
 
@@ -476,7 +476,7 @@ class ScanDataList(List[ScanData]):
     def __eq__(self, other):
         return self is other
 
-    def __hash__(self):
+    def __hash__(self):  # type: ignore[override]
         return id(self)
 
 

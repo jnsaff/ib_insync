@@ -57,7 +57,7 @@ def df(objs, labels: Optional[List[str]] = None):
                 df.columns = _fields
     else:
         df = None
-    if labels:
+    if labels and df is not None:
         exclude = [label for label in df if label not in labels]
         df = df.drop(exclude, axis=1)
     return df
@@ -103,7 +103,7 @@ def dataclassUpdate(obj, *srcObjs, **kwargs) -> object:
     Update fields of the given ``dataclass`` object from zero or more
     ``dataclass`` source objects and/or from keyword arguments.
     """
-    if not is_dataclass(obj):
+    if not is_dataclass(obj) or isinstance(obj, type):
         raise TypeError(f'Object {obj} is not a dataclass')
     for srcObj in srcObjs:
         obj.__dict__.update(dataclassAsDict(srcObj))
@@ -139,8 +139,10 @@ def tree(obj):
     Convert object to a tree of lists, dicts and simple values.
     The result can be serialized to JSON.
     """
-    if isinstance(obj, (bool, int, float, str, bytes)):
+    if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
+    elif isinstance(obj, bytes):
+        return obj.decode(errors='backslashreplace')
     elif isinstance(obj, (dt.date, dt.time)):
         return obj.isoformat()
     elif isinstance(obj, dict):
@@ -257,16 +259,19 @@ def isNan(x: float) -> bool:
 
 def formatSI(n: float) -> str:
     """Format the integer or float n to 3 significant digits + SI prefix."""
+    if not math.isfinite(n):
+        return f'{n} '
     s = ''
     if n < 0:
         n = -n
         s += '-'
     if type(n) is int and n < 1000:
-        s = str(n) + ' '
+        s += str(n) + ' '
     elif n < 1e-22:
         s = '0.00 '
+    elif n >= 9.99e26:
+        s += f'{n:.2e} '
     else:
-        assert n < 9.99e26
         log = int(math.floor(math.log10(n)))
         i, j = divmod(log, 3)
         for _try in range(2):
@@ -333,14 +338,18 @@ def run(*awaitables: Awaitable, timeout: Optional[float] = None):
             future = asyncio.wait_for(future, timeout)
         task = asyncio.ensure_future(future)
 
-        def onError(_):
+        err: Optional[BaseException] = None
+
+        def onError(e):
+            nonlocal err
+            err = e
             task.cancel()
 
         globalErrorEvent.connect(onError)
         try:
             result = loop.run_until_complete(task)
         except asyncio.CancelledError as e:
-            raise globalErrorEvent.value() or e
+            raise err or e
         finally:
             globalErrorEvent.disconnect(onError)
 
@@ -403,11 +412,13 @@ def timeRange(start: Time_t, end: Time_t, step: float) \
     assert step > 0
     delta = dt.timedelta(seconds=step)
     t = _fillDate(start)
+    endDt = _fillDate(end)
     tz = dt.timezone.utc if t.tzinfo else None
     now = dt.datetime.now(tz)
-    while t < now:
-        t += delta
-    while t <= _fillDate(end):
+    if t < now:
+        steps = math.ceil((now - t).total_seconds() / step)
+        t += dt.timedelta(seconds=steps * step)
+    while t <= endDt:
         waitUntil(t)
         yield t
         t += delta
@@ -435,11 +446,13 @@ async def timeRangeAsync(
     assert step > 0
     delta = dt.timedelta(seconds=step)
     t = _fillDate(start)
+    endDt = _fillDate(end)
     tz = dt.timezone.utc if t.tzinfo else None
     now = dt.datetime.now(tz)
-    while t < now:
-        t += delta
-    while t <= _fillDate(end):
+    if t < now:
+        steps = math.ceil((now - t).total_seconds() / step)
+        t += dt.timedelta(seconds=steps * step)
+    while t <= endDt:
         await waitUntilAsync(t)
         yield t
         t += delta
@@ -528,23 +541,32 @@ def formatIBDatetime(t: Union[dt.date, dt.datetime, str, None]) -> str:
 
 def parseIBDatetime(s: str) -> Union[dt.date, dt.datetime]:
     """Parse string in IB date or datetime format to datetime."""
-    if len(s) == 8:
+    if len(s) == 8 and s.isdigit():
         # YYYYmmdd
         y = int(s[0:4])
         m = int(s[4:6])
         d = int(s[6:8])
-        t = dt.date(y, m, d)
+        t: Union[dt.date, dt.datetime] = dt.date(y, m, d)
     elif s.isdigit():
         t = dt.datetime.fromtimestamp(int(s), dt.timezone.utc)
-    elif s.count(' ') >= 2 and '  ' not in s:
-        # 20221125 10:00:00 Europe/Amsterdam
-        s0, s1, s2 = s.split(' ', 2)
-        t = dt.datetime.strptime(s0 + s1, '%Y%m%d%H:%M:%S')
-        t = t.replace(tzinfo=ZoneInfo(s2))
     else:
-        # YYYYmmdd  HH:MM:SS
-        # or
-        # YYYY-mm-dd HH:MM:SS.0
-        ss = s.replace(' ', '').replace('-', '')[:16]
-        t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+        parts = s.split()
+        if len(parts) == 3:
+            # 20221125 10:00:00 Europe/Amsterdam
+            # or 20221125  10:00:00 Europe/Amsterdam
+            s0, s1, s2 = parts
+            ss = (s0 + s1).replace('-', '')[:16]
+            t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+            t = t.replace(tzinfo=ZoneInfo(s2))
+        elif len(parts) == 2 and ':' in parts[0]:
+            # 20220101-10:30:00 US/Eastern
+            ss = parts[0].replace('-', '')[:16]
+            t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+            t = t.replace(tzinfo=ZoneInfo(parts[1]))
+        else:
+            # YYYYmmdd  HH:MM:SS
+            # or YYYYmmdd-HH:MM:SS
+            # or YYYY-mm-dd HH:MM:SS.0
+            ss = s.replace(' ', '').replace('-', '')[:16]
+            t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
     return t
