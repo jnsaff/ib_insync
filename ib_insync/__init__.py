@@ -65,11 +65,11 @@ __all__ = [
 
 # compatibility with old Object
 for obj in locals().copy().values():
-    if dataclasses.is_dataclass(obj):
-        obj.dict = util.dataclassAsDict
-        obj.tuple = util.dataclassAsTuple
-        obj.update = util.dataclassUpdate
-        obj.nonDefaults = util.dataclassNonDefaults
+    if isinstance(obj, type) and dataclasses.is_dataclass(obj):
+        setattr(obj, 'dict', util.dataclassAsDict)
+        setattr(obj, 'tuple', util.dataclassAsTuple)
+        setattr(obj, 'update', util.dataclassUpdate)
+        setattr(obj, 'nonDefaults', util.dataclassNonDefaults)
 
 del sys
 del dataclasses

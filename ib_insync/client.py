@@ -113,6 +113,7 @@ class Client:
         self.clientId = -1
         self.optCapab = ''
         self.connectOptions = b''
+        self._throttleHandle: Optional[asyncio.TimerHandle] = None
         self.reset()
 
     def reset(self):
@@ -127,6 +128,9 @@ class Client:
         self._numBytesRecv = 0
         self._numMsgRecv = 0
         self._isThrottling = False
+        if self._throttleHandle:
+            self._throttleHandle.cancel()
+            self._throttleHandle = None
         self._msgQ: Deque[str] = deque()
         self._timeQ: Deque[float] = deque()
 
@@ -245,7 +249,7 @@ class Client:
                 s = ''
             elif typ is str:
                 s = field
-            elif type is int:
+            elif typ is int:
                 s = str(field)
             elif typ is float:
                 s = 'Infinite' if field == math.inf else str(field)
@@ -268,12 +272,12 @@ class Client:
             msg.write('\0')
         self.sendMsg(msg.getvalue())
 
-    def sendMsg(self, msg: str):
+    def sendMsg(self, msg: Optional[str]):
         loop = getLoop()
         t = loop.time()
         times = self._timeQ
         msgs = self._msgQ
-        while times and t - times[0] > self.RequestsInterval:
+        while times and t - times[0] >= self.RequestsInterval:
             times.popleft()
         if msg:
             msgs.append(msg)
@@ -288,14 +292,22 @@ class Client:
                 self._isThrottling = True
                 self.throttleStart.emit()
                 self._logger.debug('Started to throttle requests')
-            loop.call_at(
-                times[0] + self.RequestsInterval,
-                self.sendMsg, None)
+            if not self._throttleHandle or self._throttleHandle.cancelled():
+                self._throttleHandle = loop.call_at(
+                    times[0] + self.RequestsInterval,
+                    self._onThrottleTimer)
         else:
+            if self._throttleHandle:
+                self._throttleHandle.cancel()
+                self._throttleHandle = None
             if self._isThrottling:
                 self._isThrottling = False
                 self.throttleEnd.emit()
                 self._logger.debug('Stopped to throttle requests')
+
+    def _onThrottleTimer(self):
+        self._throttleHandle = None
+        self.sendMsg(None)
 
     def _prefix(self, msg):
         # prefix a message with its length
@@ -321,6 +333,8 @@ class Client:
             self._data = self._data[msgEnd:]
             fields = msg.split('\0')
             fields.pop()  # pop off last empty element
+            if not fields:
+                continue
             self._numMsgRecv += 1
 
             if debug:
@@ -331,8 +345,10 @@ class Client:
                 version, _connTime = fields
                 self._serverVersion = int(version)
                 if self._serverVersion < self.MinClientVersion:
+                    self.conn.disconnect()
                     self._onSocketDisconnected(
-                        'TWS/gateway version must be >= 972')
+                        f'TWS/gateway server version {self._serverVersion} '
+                        f'must be >= {self.MinClientVersion}')
                     return
                 self.decoder.serverVersion = self._serverVersion
                 self.connState = Client.CONNECTED
@@ -811,15 +827,17 @@ class Client:
 
     def calculateImpliedVolatility(
             self, reqId, contract, optionPrice, underPrice, implVolOptions):
+        options = implVolOptions or []
         self.send(
             54, 3, reqId, contract, optionPrice, underPrice,
-            len(implVolOptions), implVolOptions)
+            len(options), options)
 
     def calculateOptionPrice(
             self, reqId, contract, volatility, underPrice, optPrcOptions):
+        options = optPrcOptions or []
         self.send(
             55, 3, reqId, contract, volatility, underPrice,
-            len(optPrcOptions), optPrcOptions)
+            len(options), options)
 
     def cancelCalculateImpliedVolatility(self, reqId):
         self.send(56, 1, reqId)

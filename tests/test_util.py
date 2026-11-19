@@ -146,10 +146,9 @@ class TestTimeUtilities:
 
     def test_parse_ib_datetime_with_timezone(self):
         """Test parsing IB datetime with timezone."""
-        # Test with timezone
-        dt_str = "20220101-10:30:00 US/Eastern"
+        dt_str = "20220101 10:30:00 US/Eastern"
         result = util.parseIBDatetime(dt_str)
-        
+
         assert isinstance(result, dt.datetime)
         assert result.year == 2022
         assert result.month == 1
@@ -157,6 +156,7 @@ class TestTimeUtilities:
         assert result.hour == 10
         assert result.minute == 30
         assert result.second == 0
+        assert result.tzinfo == util.getZoneInfo("US/Eastern")
 
     def test_parse_ib_datetime_without_timezone(self):
         """Test parsing IB datetime without timezone."""
@@ -214,6 +214,16 @@ class TestHelperFunctions:
 class TestEventLoopUtilities:
     """Test event loop utilities."""
 
+    @pytest.fixture(autouse=True)
+    def _event_loop(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            yield loop
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
     def test_get_loop(self):
         """Test getLoop function."""
         loop = util.getLoop()
@@ -223,7 +233,7 @@ class TestEventLoopUtilities:
         """Test run function with coroutine."""
         async def test_coro():
             return "test_result"
-        
+
         result = util.run(test_coro())
         assert result == "test_result"
 
@@ -231,7 +241,7 @@ class TestEventLoopUtilities:
         """Test run function with coroutine and arguments."""
         async def test_coro(arg1, arg2):
             return arg1 + arg2
-        
+
         result = util.run(test_coro(10, 20))
         assert result == 30
 

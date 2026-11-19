@@ -76,7 +76,7 @@ class Contract:
                 * secIdType='ISIN', secId='US0378331005'
                 * secIdType='CUSIP', secId='037833100'
         secId (str): Security identifier.
-        comboLegsDescription (str): Description of the combo legs.
+        comboLegsDescrip (str): Description of the combo legs.
         comboLegs (List[ComboLeg]): The legs of a combined contract definition.
         deltaNeutralContract (DeltaNeutralContract): Delta and underlying
             price for Delta-Neutral combo orders.
@@ -130,7 +130,7 @@ class Contract:
             'NEWS': Contract,
             'EVENT': Contract,
         }.get(secType, Contract)
-        if cls is not Contract:
+        if cls is not Contract and secType != 'IOPT':
             kwargs.pop('secType', '')
         return cls(**kwargs)
 
@@ -145,11 +145,13 @@ class Contract:
             and self.secType != 'BAG')
 
     def __eq__(self, other):
-        return (
-            isinstance(other, Contract)
-            and (
-                self.conId and self.conId == other.conId
-                or util.dataclassAsDict(self) == util.dataclassAsDict(other)))
+        if not isinstance(other, Contract):
+            return NotImplemented
+        if (self.isHashable() and other.isHashable()
+                and (self.secType == 'CONTFUT')
+                == (other.secType == 'CONTFUT')):
+            return self.conId == other.conId
+        return util.dataclassAsDict(self) == util.dataclassAsDict(other)
 
     def __hash__(self):
         if not self.isHashable():
@@ -293,7 +295,7 @@ class Forex(Contract):
 
     def __repr__(self):
         attrs = util.dataclassNonDefaults(self)
-        attrs.pop('secType')
+        attrs.pop('secType', '')
         s = 'Forex('
         if 'symbol' in attrs and 'currency' in attrs:
             pair = attrs.pop('symbol')
@@ -412,7 +414,8 @@ class Warrant(Contract):
 
     def __init__(self, **kwargs):
         """Warrant option."""
-        Contract.__init__(self, 'WAR', **kwargs)
+        secType = kwargs.pop('secType', 'WAR')
+        Contract.__init__(self, secType, **kwargs)
 
 
 class Bag(Contract):
@@ -487,7 +490,7 @@ class ContractDetails:
     tradingHours: str = ''
     liquidHours: str = ''
     evRule: str = ''
-    evMultiplier: int = 0
+    evMultiplier: float = 0.0
     mdSizeMultiplier: int = 1  # obsolete
     aggGroup: int = 0
     underSymbol: str = ''
@@ -508,7 +511,7 @@ class ContractDetails:
     couponType: str = ''
     callable: bool = False
     putable: bool = False
-    coupon: float = 0
+    coupon: float = 0.0
     convertible: bool = False
     maturity: str = ''
     issueDate: str = ''
@@ -524,7 +527,9 @@ class ContractDetails:
         return self._parseSessions(self.liquidHours)
 
     def _parseSessions(self, s: str) -> List[TradingSession]:
-        tz = util.ZoneInfo(self.timeZoneId)
+        if not s:
+            return []
+        tz = util.getZoneInfo(self.timeZoneId)
         sessions = []
         for sess in s.split(';'):
             if not sess or 'CLOSED' in sess:

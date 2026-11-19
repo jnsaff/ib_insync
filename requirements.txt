@@ -1,2 +1,3 @@
 eventkit
 nest_asyncio
+tzdata

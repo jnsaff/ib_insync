@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ from ib_insync.order import Order, OrderState, OrderStatus, Trade
 from ib_insync.ticker import Ticker
 from ib_insync.util import (
     UNSET_DOUBLE, UNSET_INTEGER, dataclassAsDict, dataclassUpdate,
-    getLoop, globalErrorEvent, isNan, parseIBDatetime)
+    formatIBDatetime, getLoop, globalErrorEvent, isNan, parseIBDatetime)
 
 if TYPE_CHECKING:
     from ib_insync.ib import IB
@@ -117,8 +118,10 @@ class Wrapper:
     clientId: int
     wshMetaReqId: int
     wshEventReqId: int
+    acctSummaryReqId: int
     _reqId2Contract: Dict[int, Contract]
     _timeout: float
+    _lastTimeMono: float
 
     _futures: Dict[Any, asyncio.Future]
     """ _futures and _results are linked by key. """
@@ -155,10 +158,12 @@ class Wrapper:
         self.pnlKey2ReqId = {}
         self.pnlSingleKey2ReqId = {}
         self.lastTime = datetime.min
+        self._lastTimeMono = 0.0
         self.accounts = []
         self.clientId = -1
         self.wshMetaReqId = 0
         self.wshEventReqId = 0
+        self.acctSummaryReqId = 0
         self._reqId2Contract = {}
         self._timeout = 0
         self._futures = {}
@@ -177,11 +182,14 @@ class Wrapper:
         for event in events:
             event.set_done()
 
-    def connectionClosed(self):
-        error = ConnectionError('Socket disconnect')
+    def _failPendingFutures(self, error: Exception):
         for future in self._futures.values():
             if not future.done():
                 future.set_exception(error)
+
+    def connectionClosed(self):
+        error = ConnectionError('Socket disconnect')
+        self._failPendingFutures(error)
         globalErrorEvent.emit(error)
         self.reset()
 
@@ -204,9 +212,10 @@ class Wrapper:
         """
         future = self._futures.pop(key, None)
         self._reqId2Contract.pop(key, None)
+        res = self._results.pop(key, [])
         if future:
             if result is None:
-                result = self._results.pop(key, [])
+                result = res
             if not future.done():
                 if success:
                     future.set_result(result)
@@ -225,6 +234,10 @@ class Wrapper:
                 contract=contract, ticks=[], tickByTicks=[],
                 domBids=[], domAsks=[], domTicks=[])
             self.tickers[id(contract)] = ticker
+        oldReqId = self.ticker2ReqId[tickType].get(ticker)
+        if oldReqId is not None and oldReqId != reqId:
+            self.reqId2Ticker.pop(oldReqId, None)
+            self._reqId2Contract.pop(oldReqId, None)
         self.reqId2Ticker[reqId] = ticker
         self._reqId2Contract[reqId] = contract
         self.ticker2ReqId[tickType][ticker] = reqId
@@ -232,7 +245,9 @@ class Wrapper:
 
     def endTicker(self, ticker: Ticker, tickType: Union[int, str]):
         reqId = self.ticker2ReqId[tickType].pop(ticker, 0)
-        self._reqId2Contract.pop(reqId, None)
+        if reqId:
+            self.reqId2Ticker.pop(reqId, None)
+            self._reqId2Contract.pop(reqId, None)
         return reqId
 
     def startSubscription(self, reqId, subscriber, contract=None):
@@ -256,19 +271,19 @@ class Wrapper:
         return key
 
     def setTimeout(self, timeout: float):
-        self.lastTime = datetime.now(timezone.utc)
         if self._timeoutHandle:
             self._timeoutHandle.cancel()
         self._timeoutHandle = None
         self._timeout = timeout
         if timeout:
+            self._lastTimeMono = time.monotonic()
             self._setTimer(timeout)
 
     def _setTimer(self, delay: float = 0):
-        if self.lastTime == datetime.min:
+        if not self._timeout or not self._lastTimeMono:
             return
-        now = datetime.now(timezone.utc)
-        diff = (now - self.lastTime).total_seconds()
+        now = time.monotonic()
+        diff = now - self._lastTimeMono
         if not delay:
             delay = self._timeout - diff
         if delay > 0:
@@ -381,8 +396,8 @@ class Wrapper:
         self.ib.pnlEvent.emit(pnl)
 
     def pnlSingle(
-            self, reqId: int, pos: int, dailyPnL: float, unrealizedPnL: float,
-            realizedPnL: float, value: float):
+            self, reqId: int, pos: float, dailyPnL: float,
+            unrealizedPnL: float, realizedPnL: float, value: float):
         pnlSingle = self.reqId2PnlSingle.get(reqId)
         if not pnlSingle:
             return
@@ -452,7 +467,9 @@ class Wrapper:
         orderStatus = OrderStatus(
             orderId=order.orderId, status=orderState.status)
         trade = Trade(contract, order, orderStatus, [], [])
-        self._results['completedOrders'].append(trade)
+        results = self._results.get('completedOrders')
+        if results is not None:
+            results.append(trade)
         if order.permId not in self.permId2Trade:
             self.trades[order.permId] = trade
             self.permId2Trade[order.permId] = trade
@@ -497,7 +514,8 @@ class Wrapper:
                 if status != oldStatus:
                     if status == OrderStatus.Filled:
                         trade.filledEvent.emit(trade)
-                    elif status == OrderStatus.Cancelled:
+                    elif status in (
+                            OrderStatus.Cancelled, OrderStatus.ApiCancelled):
                         trade.cancelledEvent.emit(trade)
         else:
             self._logger.error(
@@ -572,7 +590,9 @@ class Wrapper:
         pass
 
     def contractDetails(self, reqId: int, contractDetails: ContractDetails):
-        self._results[reqId].append(contractDetails)
+        results = self._results.get(reqId)
+        if results is not None:
+            results.append(contractDetails)
 
     bondContractDetails = contractDetails
 
@@ -614,19 +634,23 @@ class Wrapper:
 
     def historicalDataUpdate(self, reqId: int, bar: BarData):
         bars = self.reqId2Subscriber.get(reqId)
-        if not bars:
+        if bars is None:
             return
         bar.date = parseIBDatetime(bar.date)  # type: ignore
-        lastDate = bars[-1].date
-        if bar.date < lastDate:
-            return
-        hasNewBar = len(bars) == 0 or bar.date > lastDate
-        if hasNewBar:
+        if len(bars) == 0:
+            hasNewBar = True
             bars.append(bar)
-        elif bars[-1] != bar:
-            bars[-1] = bar
         else:
-            return
+            lastDate = bars[-1].date
+            if bar.date < lastDate:
+                return
+            hasNewBar = bar.date > lastDate
+            if hasNewBar:
+                bars.append(bar)
+            elif bars[-1] != bar:
+                bars[-1] = bar
+            else:
+                return
         self.ib.barUpdateEvent.emit(bars, hasNewBar)
         bars.updateEvent.emit(bars, hasNewBar)
 
@@ -885,10 +909,10 @@ class Wrapper:
                 price = float(priceStr)
                 size = float(sizeStr)
                 if price and size:
-                    if ticker.prevLast != ticker.last:
+                    if price != ticker.last:
                         ticker.prevLast = ticker.last
                         ticker.last = price
-                    if ticker.prevLastSize != ticker.lastSize:
+                    if size != ticker.lastSize:
                         ticker.prevLastSize = ticker.lastSize
                         ticker.lastSize = size
                     tick = TickData(self.lastTime, tickType, price, size)
@@ -966,15 +990,21 @@ class Wrapper:
             side: int, price: float, size: float, isSmartDepth: bool = False):
         # operation: 0 = insert, 1 = update, 2 = delete
         # side: 0 = ask, 1 = bid
-        ticker = self.reqId2Ticker[reqId]
+        ticker = self.reqId2Ticker.get(reqId)
+        if not ticker:
+            self._logger.error(f'updateMktDepthL2: Unknown reqId: {reqId}')
+            return
 
         dom = ticker.domBids if side else ticker.domAsks
         if operation == 0:
             dom.insert(position, DOMLevel(price, size, marketMaker))
         elif operation == 1:
-            dom[position] = DOMLevel(price, size, marketMaker)
+            if 0 <= position < len(dom):
+                dom[position] = DOMLevel(price, size, marketMaker)
+            else:
+                dom.insert(position, DOMLevel(price, size, marketMaker))
         elif operation == 2:
-            if position < len(dom):
+            if 0 <= position < len(dom):
                 level = dom.pop(position)
                 price = level.price
                 size = 0
@@ -995,8 +1025,8 @@ class Wrapper:
             optPrice if optPrice != -1 else None,
             pvDividend if pvDividend != -1 else None,
             gamma if gamma != -2 else None,
-            vega if vega != -2 else vega,
-            theta if theta != -2 else theta,
+            vega if vega != -2 else None,
+            theta if theta != -2 else None,
             undPrice if undPrice != -1 else None)
         ticker = self.reqId2Ticker.get(reqId)
         if ticker:
@@ -1063,7 +1093,9 @@ class Wrapper:
         chain = OptionChain(
             exchange, underlyingConId, tradingClass, multiplier,
             expirations, strikes)
-        self._results[reqId].append(chain)
+        results = self._results.get(reqId)
+        if results is not None:
+            results.append(chain)
 
     def securityDefinitionOptionParameterEnd(self, reqId: int):
         self._endReq(reqId)
@@ -1092,7 +1124,9 @@ class Wrapper:
         dt = parseIBDatetime(time)
         dt = cast(datetime, dt)
         article = HistoricalNews(dt, providerCode, articleId, headline)
-        self._results[reqId].append(article)
+        results = self._results.get(reqId)
+        if results is not None:
+            results.append(article)
 
     def historicalNewsEnd(self, reqId, _hasMore: bool):
         self._endReq(reqId)
@@ -1134,7 +1168,7 @@ class Wrapper:
         self._endReq(reqId, dataJson)
 
     def userInfo(self, reqId: int, whiteBrandingId: str):
-        self._endReq(reqId)
+        self._endReq(reqId, whiteBrandingId)
 
     def softDollarTiers(self, reqId: int, tiers: List[SoftDollarTier]):
         pass
@@ -1178,10 +1212,11 @@ class Wrapper:
                     self._endReq(reqId)
 
             elif trade:
-                # something is wrong with the order, cancel it
                 if advancedOrderRejectJson:
                     trade.advancedError = advancedOrderRejectJson
-                if not trade.isDone():
+                if trade.orderStatus.status in (
+                        OrderStatus.PendingSubmit, OrderStatus.ApiPending):
+                    # new order was rejected before becoming live
                     status = trade.orderStatus.status = OrderStatus.Cancelled
                     logEntry = TradeLogEntry(
                         self.lastTime, status, msg, errorCode)
@@ -1190,6 +1225,13 @@ class Wrapper:
                     self.ib.orderStatusEvent.emit(trade)
                     trade.statusEvent.emit(trade)
                     trade.cancelledEvent.emit(trade)
+                elif not trade.isDone():
+                    # do not mark a live/working order as Cancelled on
+                    # modification/cancel errors; record in trade log instead
+                    logEntry = TradeLogEntry(
+                        self.lastTime, trade.orderStatus.status,
+                        msg, errorCode)
+                    trade.log.append(logEntry)
 
         if errorCode == 165:
             # for scan data subscription there are no longer matching results
@@ -1223,7 +1265,7 @@ class Wrapper:
             elif isinstance(bars, BarDataList):
                 self.ib.client.cancelHistoricalData(reqId)
                 self.ib.client.reqHistoricalData(
-                    reqId, bars.contract, bars.endDateTime,
+                    reqId, bars.contract, formatIBDatetime(bars.endDateTime),
                     bars.durationStr, bars.barSizeSetting, bars.whatToShow,
                     bars.useRTH, bars.formatDate, bars.keepUpToDate,
                     bars.chartOptions)
@@ -1232,6 +1274,7 @@ class Wrapper:
 
     def tcpDataArrived(self):
         self.lastTime = datetime.now(timezone.utc)
+        self._lastTimeMono = time.monotonic()
         for ticker in self.pendingTickers:
             ticker.ticks = []
             ticker.tickByTicks = []
@@ -1241,7 +1284,8 @@ class Wrapper:
     def tcpDataProcessed(self):
         self.ib.updateEvent.emit()
         if self.pendingTickers:
-            for ticker in self.pendingTickers:
+            pending = set(self.pendingTickers)
+            for ticker in pending:
                 ticker.time = self.lastTime
                 ticker.updateEvent.emit(ticker)
-            self.ib.pendingTickersEvent.emit(self.pendingTickers)
+            self.ib.pendingTickersEvent.emit(pending)
