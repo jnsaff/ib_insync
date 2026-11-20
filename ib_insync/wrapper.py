@@ -4,7 +4,6 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, List, Optional, TYPE_CHECKING, cast
 
@@ -34,6 +33,60 @@ if TYPE_CHECKING:
 
 
 OrderKeyType = int | tuple[int, int]
+
+_PRICE_TICK_ATTRS: dict[int, str] = {
+    6: 'high', 72: 'high',
+    7: 'low', 73: 'low',
+    9: 'close', 75: 'close',
+    14: 'open', 76: 'open',
+    15: 'low13week',
+    16: 'high13week',
+    17: 'low26week',
+    18: 'high26week',
+    19: 'low52week',
+    20: 'high52week',
+    35: 'auctionPrice',
+    37: 'markPrice',
+    50: 'bidYield', 103: 'bidYield',
+    51: 'askYield', 104: 'askYield',
+    52: 'lastYield',
+}
+
+_SIZE_TICK_ATTRS: dict[int, str] = {
+    8: 'volume', 74: 'volume',
+    21: 'avVolume',
+    27: 'callOpenInterest',
+    28: 'putOpenInterest',
+    29: 'callVolume',
+    30: 'putVolume',
+    34: 'auctionVolume',
+    36: 'auctionImbalance',
+    61: 'regulatoryImbalance',
+    86: 'futuresOpenInterest',
+    87: 'avOptionVolume',
+    89: 'shortableShares',
+}
+
+_GENERIC_TICK_ATTRS: dict[int, str] = {
+    23: 'histVolatility',
+    24: 'impliedVolatility',
+    31: 'indexFuturePremium',
+    49: 'halted',
+    54: 'tradeCount',
+    55: 'tradeRate',
+    56: 'volumeRate',
+    58: 'rtHistVolatility',
+}
+
+_OPTION_GREEKS_ATTRS: dict[int, str] = {
+    10: 'bidGreeks', 80: 'bidGreeks',
+    11: 'askGreeks', 81: 'askGreeks',
+    12: 'lastGreeks', 82: 'lastGreeks',
+    13: 'modelGreeks', 83: 'modelGreeks',
+}
+
+_WARNING_CODES: frozenset[int] = frozenset({
+    110, 165, 202, 399, 404, 434, 492, 10167})
 
 
 class RequestError(Exception):
@@ -741,36 +794,10 @@ class Wrapper:
             if size != ticker.lastSize:
                 ticker.prevLastSize = ticker.lastSize
                 ticker.lastSize = size
-        elif tickType in (6, 72):
-            ticker.high = price
-        elif tickType in (7, 73):
-            ticker.low = price
-        elif tickType in (9, 75):
-            ticker.close = price
-        elif tickType in (14, 76):
-            ticker.open = price
-        elif tickType == 15:
-            ticker.low13week = price
-        elif tickType == 16:
-            ticker.high13week = price
-        elif tickType == 17:
-            ticker.low26week = price
-        elif tickType == 18:
-            ticker.high26week = price
-        elif tickType == 19:
-            ticker.low52week = price
-        elif tickType == 20:
-            ticker.high52week = price
-        elif tickType == 35:
-            ticker.auctionPrice = price
-        elif tickType == 37:
-            ticker.markPrice = price
-        elif tickType in (50, 103):
-            ticker.bidYield = price
-        elif tickType in (51, 104):
-            ticker.askYield = price
-        elif tickType == 52:
-            ticker.lastYield = price
+        else:
+            attr = _PRICE_TICK_ATTRS.get(tickType)
+            if attr is not None:
+                setattr(ticker, attr, price)
         if price or size:
             tick = TickData(self.lastTime, tickType, price, size)
             ticker.ticks.append(tick)
@@ -802,30 +829,10 @@ class Wrapper:
             if size != ticker.lastSize:
                 ticker.prevLastSize = ticker.lastSize
                 ticker.lastSize = size
-        elif tickType in (8, 74):
-            ticker.volume = size
-        elif tickType == 21:
-            ticker.avVolume = size
-        elif tickType == 27:
-            ticker.callOpenInterest = size
-        elif tickType == 28:
-            ticker.putOpenInterest = size
-        elif tickType == 29:
-            ticker.callVolume = size
-        elif tickType == 30:
-            ticker.putVolume = size
-        elif tickType == 34:
-            ticker.auctionVolume = size
-        elif tickType == 36:
-            ticker.auctionImbalance = size
-        elif tickType == 61:
-            ticker.regulatoryImbalance = size
-        elif tickType == 86:
-            ticker.futuresOpenInterest = size
-        elif tickType == 87:
-            ticker.avOptionVolume = size
-        elif tickType == 89:
-            ticker.shortableShares = size
+        else:
+            attr = _SIZE_TICK_ATTRS.get(tickType)
+            if attr is not None:
+                setattr(ticker, attr, size)
         if price or size:
             tick = TickData(self.lastTime, tickType, price, size)
             ticker.ticks.append(tick)
@@ -895,24 +902,7 @@ class Wrapper:
         if not ticker:
             return
         try:
-            if tickType == 32:
-                ticker.bidExchange = value
-            elif tickType == 33:
-                ticker.askExchange = value
-            elif tickType == 84:
-                ticker.lastExchange = value
-            elif tickType == 47:
-                # https://web.archive.org/web/20200725010343/https://interactivebrokers.github.io/tws-api/fundamental_ratios_tags.html
-                d: dict[str, Any] = dict(
-                    t.split('=') for t in value.split(';') if t)
-                for k, v in d.items():
-                    with suppress(ValueError):
-                        if v == '-99999.99':
-                            v = 'nan'
-                        d[k] = float(v)
-                        d[k] = int(v)
-                ticker.fundamentalRatios = FundamentalRatios(**d)
-            elif tickType in (48, 77):
+            if tickType in (48, 77):
                 # RT Volume or RT Trade Volume string format:
                 # price;size;ms since epoch;total volume;VWAP;single trade
                 # example:
@@ -921,14 +911,14 @@ class Wrapper:
                 if volume:
                     if tickType == 48:
                         ticker.rtVolume = float(volume)
-                    elif tickType == 77:
+                    else:
                         ticker.rtTradeVolume = float(volume)
                 if vwap:
                     ticker.vwap = float(vwap)
                 if rtTime:
                     ticker.rtTime = datetime.fromtimestamp(
-                        int(rtTime) / 1000, timezone.utc)
-                if priceStr == '':
+                        int(rtTime) * 0.001, timezone.utc)
+                if not priceStr:
                     return
                 price = float(priceStr)
                 size = float(sizeStr)
@@ -941,6 +931,30 @@ class Wrapper:
                         ticker.lastSize = size
                     tick = TickData(self.lastTime, tickType, price, size)
                     ticker.ticks.append(tick)
+            elif tickType == 32:
+                ticker.bidExchange = value
+            elif tickType == 33:
+                ticker.askExchange = value
+            elif tickType == 84:
+                ticker.lastExchange = value
+            elif tickType == 47:
+                # https://web.archive.org/web/20200725010343/https://interactivebrokers.github.io/tws-api/fundamental_ratios_tags.html
+                d: dict[str, Any] = {}
+                for t in value.split(';'):
+                    if not t:
+                        continue
+                    k, v = t.split('=')
+                    if v == '-99999.99':
+                        d[k] = float('nan')
+                    else:
+                        try:
+                            if '.' not in v and 'e' not in v and 'E' not in v:
+                                d[k] = int(v)
+                            else:
+                                d[k] = float(v)
+                        except ValueError:
+                            d[k] = v
+                ticker.fundamentalRatios = FundamentalRatios(**d)
             elif tickType == 59:
                 # Dividend tick:
                 # https://interactivebrokers.github.io/tws-api/tick_types.html#ib_dividends
@@ -961,27 +975,15 @@ class Wrapper:
         ticker = self.reqId2Ticker.get(reqId)
         if not ticker:
             return
-        try:
-            value = float(value)
-        except ValueError:
-            self._logger.error(f'genericTick: malformed value: {value!r}')
-            return
-        if tickType == 23:
-            ticker.histVolatility = value
-        elif tickType == 24:
-            ticker.impliedVolatility = value
-        elif tickType == 31:
-            ticker.indexFuturePremium = value
-        elif tickType == 49:
-            ticker.halted = value
-        elif tickType == 54:
-            ticker.tradeCount = value
-        elif tickType == 55:
-            ticker.tradeRate = value
-        elif tickType == 56:
-            ticker.volumeRate = value
-        elif tickType == 58:
-            ticker.rtHistVolatility = value
+        if type(value) is not float:
+            try:
+                value = float(value)
+            except ValueError:
+                self._logger.error(f'genericTick: malformed value: {value!r}')
+                return
+        attr = _GENERIC_TICK_ATTRS.get(tickType)
+        if attr is not None:
+            setattr(ticker, attr, value)
         tick = TickData(self.lastTime, tickType, value, 0)
         ticker.ticks.append(tick)
         self.pendingTickers.add(ticker)
@@ -1059,14 +1061,9 @@ class Wrapper:
         if ticker:
             # reply from reqMktData
             # https://interactivebrokers.github.io/tws-api/tick_types.html
-            if tickType in (10, 80):
-                ticker.bidGreeks = comp
-            elif tickType in (11, 81):
-                ticker.askGreeks = comp
-            elif tickType in (12, 82):
-                ticker.lastGreeks = comp
-            elif tickType in (13, 83):
-                ticker.modelGreeks = comp
+            attr = _OPTION_GREEKS_ATTRS.get(tickType)
+            if attr is not None:
+                setattr(ticker, attr, comp)
             self.pendingTickers.add(ticker)
         elif reqId in self._futures:
             # reply from calculateImpliedVolatility or calculateOptionPrice
@@ -1211,8 +1208,7 @@ class Wrapper:
         # https://interactivebrokers.github.io/tws-api/message_codes.html
         isRequest = reqId in self._futures
         trade = self.trades.get((self.clientId, reqId))
-        warningCodes = {110, 165, 202, 399, 404, 434, 492, 10167}
-        isWarning = errorCode in warningCodes or 2100 <= errorCode < 2200
+        isWarning = errorCode in _WARNING_CODES or 2100 <= errorCode < 2200
         if errorCode == 110 and isRequest:
             # whatIf request failed
             isWarning = False
@@ -1304,11 +1300,15 @@ class Wrapper:
     def tcpDataArrived(self) -> None:
         self.lastTime = datetime.now(timezone.utc)
         self._lastTimeMono = time.monotonic()
-        for ticker in self.pendingTickers:
-            ticker.ticks = []
-            ticker.tickByTicks = []
-            ticker.domTicks = []
-        self.pendingTickers = set()
+        if self.pendingTickers:
+            for ticker in self.pendingTickers:
+                if ticker.ticks:
+                    ticker.ticks = []
+                if ticker.tickByTicks:
+                    ticker.tickByTicks = []
+                if ticker.domTicks:
+                    ticker.domTicks = []
+            self.pendingTickers.clear()
 
     def tcpDataProcessed(self) -> None:
         self.ib.updateEvent.emit()

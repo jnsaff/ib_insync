@@ -6,6 +6,7 @@ import math
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Any, cast
 
 from .contract import (
@@ -19,6 +20,68 @@ from .objects import (
 from .order import Order, OrderComboLeg, OrderCondition, OrderState
 from .util import UNSET_DOUBLE, getZoneInfo, parseIBDatetime
 from .wrapper import Wrapper
+
+_PRICE_SIZE_TICK_MAP: dict[int, int] = {
+    1: 0, 2: 3, 4: 5, 66: 69, 67: 70, 68: 71}
+
+_UNICODE_ESCAPE_RE = re.compile(r'\\u([0-9a-fA-F]{4})')
+
+_TYPE_INT = 0
+_TYPE_FLOAT = 1
+_TYPE_BOOL = 2
+_TYPE_NAMES = ('int', 'float', 'bool')
+
+_PARSE_FIELDS_CACHE: dict[type[Any], tuple[tuple[str, int, Any], ...]] = {}
+_CONDITION_ARITY_CACHE: dict[type[Any], int] = {}
+
+
+def _parse_int(v: Any) -> int:
+    return int(v) if v else 0
+
+
+def _parse_float(v: Any) -> float:
+    return float(v) if v else 0.0
+
+
+def _parse_bool(v: Any) -> bool:
+    return bool(int(v)) if v else False
+
+
+def _parse_str(v: Any) -> Any:
+    return v
+
+
+_TYPE_CONVERTERS: dict[type[Any], Callable[[Any], Any]] = {
+    str: _parse_str,
+    int: _parse_int,
+    float: _parse_float,
+    bool: _parse_bool,
+}
+
+
+def _get_parse_fields(cls: type[Any]) -> tuple[tuple[str, int, Any], ...]:
+    spec = _PARSE_FIELDS_CACHE.get(cls)
+    if spec is None:
+        items: list[tuple[str, int, Any]] = []
+        for f in dataclasses.fields(cls):
+            typ = type(f.default)
+            if typ is int:
+                items.append((f.name, _TYPE_INT, f.default))
+            elif typ is float:
+                items.append((f.name, _TYPE_FLOAT, f.default))
+            elif typ is bool:
+                items.append((f.name, _TYPE_BOOL, f.default))
+        spec = tuple(items)
+        _PARSE_FIELDS_CACHE[cls] = spec
+    return spec
+
+
+def _get_condition_arity(cls: type[Any]) -> int:
+    n = _CONDITION_ARITY_CACHE.get(cls)
+    if n is None:
+        n = len(dataclasses.fields(cls)) - 1
+        _CONDITION_ARITY_CACHE[cls] = n
+    return n
 
 
 class Decoder:
@@ -169,6 +232,8 @@ class Decoder:
             107: self.wrap(
                 'userInfo', [int, str], skip=1)
         }
+        self._strHandlers: dict[str, Callable[[list[Any]], None]] = {
+            str(k): v for k, v in self.handlers.items()}
 
     def wrap(
             self, methodName: str, types: list[type[Any]],
@@ -178,11 +243,15 @@ class Decoder:
         with the in-order message fields as parameters, skipping over
         the first ``skip`` fields, and parsed according to the ``types`` list.
         """
+        n = len(types)
+        expected = skip + n
+        sig = tuple(types)
 
-        def handler(fields: list[Any]) -> None:
-            method = getattr(self.wrapper, methodName, None)
-            if method:
-                expected = skip + len(types)
+        if n == 0:
+            def handler0(fields: list[Any]) -> None:
+                method = getattr(self.wrapper, methodName, None)
+                if not method:
+                    return
                 if len(fields) < expected:
                     self.logger.error(
                         'Truncated %s message: expected at least %d fields, '
@@ -190,15 +259,115 @@ class Decoder:
                         methodName, expected, len(fields), fields)
                     return
                 try:
-                    args = [
-                        field if typ is str else
-                        int(field or 0) if typ is int else
-                        float(field or 0) if typ is float else
-                        bool(int(field or 0))
-                        for (typ, field) in zip(types, fields[skip:])]
-                    method(*args)
+                    method()
                 except Exception:
                     self.logger.exception(f'Error for {methodName}:')
+            return handler0
+
+        if sig == (int, int, float):
+            i1 = skip + 1
+            i2 = skip + 2
+
+            def handler_iif(fields: list[Any]) -> None:
+                method = getattr(self.wrapper, methodName, None)
+                if not method:
+                    return
+                if len(fields) < expected:
+                    self.logger.error(
+                        'Truncated %s message: expected at least %d fields, '
+                        'got %d: %s',
+                        methodName, expected, len(fields), fields)
+                    return
+                try:
+                    f0 = fields[skip]
+                    f1 = fields[i1]
+                    f2 = fields[i2]
+                    method(
+                        int(f0) if f0 else 0,
+                        int(f1) if f1 else 0,
+                        float(f2) if f2 else 0.0)
+                except Exception:
+                    self.logger.exception(f'Error for {methodName}:')
+            return handler_iif
+
+        if sig == (int, int, str):
+            i1 = skip + 1
+            i2 = skip + 2
+
+            def handler_iis(fields: list[Any]) -> None:
+                method = getattr(self.wrapper, methodName, None)
+                if not method:
+                    return
+                if len(fields) < expected:
+                    self.logger.error(
+                        'Truncated %s message: expected at least %d fields, '
+                        'got %d: %s',
+                        methodName, expected, len(fields), fields)
+                    return
+                try:
+                    f0 = fields[skip]
+                    f1 = fields[i1]
+                    method(
+                        int(f0) if f0 else 0,
+                        int(f1) if f1 else 0,
+                        fields[i2])
+                except Exception:
+                    self.logger.exception(f'Error for {methodName}:')
+            return handler_iis
+
+        if sig == (int,):
+            def handler_i(fields: list[Any]) -> None:
+                method = getattr(self.wrapper, methodName, None)
+                if not method:
+                    return
+                if len(fields) < expected:
+                    self.logger.error(
+                        'Truncated %s message: expected at least %d fields, '
+                        'got %d: %s',
+                        methodName, expected, len(fields), fields)
+                    return
+                try:
+                    f0 = fields[skip]
+                    method(int(f0) if f0 else 0)
+                except Exception:
+                    self.logger.exception(f'Error for {methodName}:')
+            return handler_i
+
+        if sig == (str,):
+            def handler_s(fields: list[Any]) -> None:
+                method = getattr(self.wrapper, methodName, None)
+                if not method:
+                    return
+                if len(fields) < expected:
+                    self.logger.error(
+                        'Truncated %s message: expected at least %d fields, '
+                        'got %d: %s',
+                        methodName, expected, len(fields), fields)
+                    return
+                try:
+                    method(fields[skip])
+                except Exception:
+                    self.logger.exception(f'Error for {methodName}:')
+            return handler_s
+
+        indexed: tuple[tuple[int, Callable[[Any], Any]], ...] = tuple(
+            (skip + i, _TYPE_CONVERTERS.get(t, _parse_bool))
+            for i, t in enumerate(types))
+
+        def handler(fields: list[Any]) -> None:
+            method = getattr(self.wrapper, methodName, None)
+            if not method:
+                return
+            if len(fields) < expected:
+                self.logger.error(
+                    'Truncated %s message: expected at least %d fields, '
+                    'got %d: %s',
+                    methodName, expected, len(fields), fields)
+                return
+            try:
+                method(*[conv(fields[i]) for i, conv in indexed])
+            except Exception:
+                self.logger.exception(f'Error for {methodName}:')
 
         return handler
 
@@ -207,17 +376,20 @@ class Decoder:
         if not fields:
             self.logger.warning('Received empty message fields')
             return
-        try:
-            msgId = int(fields[0])
-        except (ValueError, TypeError):
-            self.logger.error(
-                'Invalid non-integer message id %r in fields: %s',
-                fields[0], fields)
-            return
-        handler = self.handlers.get(msgId)
+        key = fields[0]
+        handler = self._strHandlers.get(key) if type(key) is str else None
         if handler is None:
-            self.logger.warning('Unknown message id %d: %s', msgId, fields)
-            return
+            try:
+                msgId = int(key)
+            except (ValueError, TypeError):
+                self.logger.error(
+                    'Invalid non-integer message id %r in fields: %s',
+                    key, fields)
+                return
+            handler = self.handlers.get(msgId)
+            if handler is None:
+                self.logger.warning('Unknown message id %d: %s', msgId, fields)
+                return
         try:
             handler(fields)
         except Exception:
@@ -225,32 +397,55 @@ class Decoder:
 
     def parse(self, obj: Any) -> None:
         """Parse the object's properties according to its default types."""
-        for field in dataclasses.fields(obj):
-            typ = type(field.default)
-            if typ is str:
-                continue
-            v = getattr(obj, field.name)
-            if not isinstance(v, str):
-                continue
-            try:
-                if typ is int:
-                    setattr(obj, field.name, int(v) if v else field.default)
-                elif typ is float:
-                    if not v:
-                        setattr(obj, field.name, field.default)
-                    elif v == 'Infinite':
-                        setattr(obj, field.name, math.inf)
+        cls = type(obj)
+        spec = _PARSE_FIELDS_CACHE.get(cls)
+        if spec is None:
+            spec = _get_parse_fields(cls)
+        d = getattr(obj, '__dict__', None)
+        if d is not None:
+            for name, code, default in spec:
+                v = d[name]
+                if type(v) is not str:
+                    continue
+                try:
+                    if code == _TYPE_INT:
+                        d[name] = int(v) if v else default
+                    elif code == _TYPE_FLOAT:
+                        if not v:
+                            d[name] = default
+                        elif v == 'Infinite':
+                            d[name] = math.inf
+                        else:
+                            d[name] = float(v)
                     else:
-                        setattr(obj, field.name, float(v))
-                elif typ is bool:
-                    setattr(
-                        obj, field.name, bool(int(v)) if v else field.default)
-            except ValueError:
-                self.logger.warning(
-                    'Invalid %s value %r for %s.%s; using default %r',
-                    typ.__name__, v, obj.__class__.__name__, field.name,
-                    field.default)
-                setattr(obj, field.name, field.default)
+                        d[name] = bool(int(v)) if v else default
+                except ValueError:
+                    self.logger.warning(
+                        'Invalid %s value %r for %s.%s; using default %r',
+                        _TYPE_NAMES[code], v, cls.__name__, name, default)
+                    d[name] = default
+        else:
+            for name, code, default in spec:
+                v = getattr(obj, name)
+                if type(v) is not str:
+                    continue
+                try:
+                    if code == _TYPE_INT:
+                        setattr(obj, name, int(v) if v else default)
+                    elif code == _TYPE_FLOAT:
+                        if not v:
+                            setattr(obj, name, default)
+                        elif v == 'Infinite':
+                            setattr(obj, name, math.inf)
+                        else:
+                            setattr(obj, name, float(v))
+                    else:
+                        setattr(obj, name, bool(int(v)) if v else default)
+                except ValueError:
+                    self.logger.warning(
+                        'Invalid %s value %r for %s.%s; using default %r',
+                        _TYPE_NAMES[code], v, cls.__name__, name, default)
+                    setattr(obj, name, default)
 
     def priceSizeTick(self, fields: list[Any]) -> None:
         _, _, reqId, tickType, price, size, attrib = fields
@@ -259,23 +454,21 @@ class Decoder:
             reqIdInt = int(reqId)
             tickTypeInt = int(tickType)
             priceFloat = float(price)
-            sizeFloat = float(size or 0)
-            if hasattr(self.wrapper, 'priceSizeTick'):
-                self.wrapper.priceSizeTick(
-                    reqIdInt, tickTypeInt, priceFloat, sizeFloat)
+            sizeFloat = float(size) if size else 0.0
+            priceSizeTick = getattr(self.wrapper, 'priceSizeTick', None)
+            if priceSizeTick is not None:
+                priceSizeTick(reqIdInt, tickTypeInt, priceFloat, sizeFloat)
             else:
                 tickPrice = getattr(self.wrapper, 'tickPrice', None)
                 if tickPrice:
-                    mask = int(attrib or 0)
+                    mask = int(attrib) if attrib else 0
                     ta = TickAttrib(
                         canAutoExecute=bool(mask & 1),
                         pastLimit=bool(mask & 2),
                         preOpen=bool(mask & 4))
                     tickPrice(reqIdInt, tickTypeInt, priceFloat, ta)
                 tickSize = getattr(self.wrapper, 'tickSize', None)
-                sizeTickType = {
-                    1: 0, 2: 3, 4: 5, 66: 69, 67: 70, 68: 71
-                }.get(tickTypeInt)
+                sizeTickType = _PRICE_SIZE_TICK_MAP.get(tickTypeInt)
                 if tickSize and sizeTickType is not None and sizeFloat:
                     tickSize(reqIdInt, sizeTickType, sizeFloat)
 
@@ -319,69 +512,57 @@ class Decoder:
     def contractDetails(self, fields: list[Any]) -> None:
         cd = ContractDetails()
         cd.contract = c = Contract()
+        it = iter(fields)
+        get = it.__next__
         if self.serverVersion < 164:
-            fields.pop(0)
-        (
-            _,
-            reqId,
-            c.symbol,
-            c.secType,
-            lastTimes,
-            c.strike,
-            c.right,
-            c.exchange,
-            c.currency,
-            c.localSymbol,
-            cd.marketName,
-            c.tradingClass,
-            c.conId,
-            cd.minTick,
-            *fields) = fields
+            get()
+        get()  # msgId or version
+        reqId = get()
+        c.symbol = get()
+        c.secType = get()
+        lastTimes = get()
+        c.strike = get()
+        c.right = get()
+        c.exchange = get()
+        c.currency = get()
+        c.localSymbol = get()
+        cd.marketName = get()
+        c.tradingClass = get()
+        c.conId = get()
+        cd.minTick = get()
         if self.serverVersion < 164:
-            fields.pop(0)  # obsolete mdSizeMultiplier
-        (
-            c.multiplier,
-            cd.orderTypes,
-            cd.validExchanges,
-            cd.priceMagnifier,
-            cd.underConId,
-            cd.longName,
-            c.primaryExchange,
-            cd.contractMonth,
-            cd.industry,
-            cd.category,
-            cd.subcategory,
-            cd.timeZoneId,
-            cd.tradingHours,
-            cd.liquidHours,
-            cd.evRule,
-            cd.evMultiplier,
-            numSecIds,
-            *fields) = fields
-
-        numSecIds = int(numSecIds)
+            get()  # obsolete mdSizeMultiplier
+        c.multiplier = get()
+        cd.orderTypes = get()
+        cd.validExchanges = get()
+        cd.priceMagnifier = get()
+        cd.underConId = get()
+        cd.longName = get()
+        c.primaryExchange = get()
+        cd.contractMonth = get()
+        cd.industry = get()
+        cd.category = get()
+        cd.subcategory = get()
+        cd.timeZoneId = get()
+        cd.tradingHours = get()
+        cd.liquidHours = get()
+        cd.evRule = get()
+        cd.evMultiplier = get()
+        numSecIds = int(get())
         if numSecIds > 0:
-            cd.secIdList = []
-            for _ in range(numSecIds):
-                tag, value, *fields = fields
-                cd.secIdList += [TagValue(tag, value)]
-        (
-            cd.aggGroup,
-            cd.underSymbol,
-            cd.underSecType,
-            cd.marketRuleIds,
-            cd.realExpirationDate,
-            cd.stockType,
-            *fields) = fields
+            cd.secIdList = [TagValue(get(), get()) for _ in range(numSecIds)]
+        cd.aggGroup = get()
+        cd.underSymbol = get()
+        cd.underSecType = get()
+        cd.marketRuleIds = get()
+        cd.realExpirationDate = get()
+        cd.stockType = get()
         if self.serverVersion == 163:
-            cd.suggestedSizeIncrement, *fields = fields
-        if self.serverVersion >= 164:
-            (
-                cd.minSize,
-                cd.sizeIncrement,
-                cd.suggestedSizeIncrement,
-                # cd.minCashQtySize,
-                *fields) = fields
+            cd.suggestedSizeIncrement = get()
+        elif self.serverVersion >= 164:
+            cd.minSize = get()
+            cd.sizeIncrement = get()
+            cd.suggestedSizeIncrement = get()
 
         times = lastTimes.split('-' if '-' in lastTimes else None)
         if len(times) > 0:
@@ -391,10 +572,10 @@ class Decoder:
         if len(times) > 2:
             cd.timeZoneId = times[2]
 
-        cd.longName = re.sub(
-            r'\\u([0-9a-fA-F]{4})',
-            lambda m: chr(int(m.group(1), 16)),
-            cd.longName)
+        if '\\u' in cd.longName:
+            cd.longName = _UNICODE_ESCAPE_RE.sub(
+                lambda m: chr(int(m.group(1), 16)),
+                cd.longName)
         self.parse(cd)
         self.parse(c)
         self.wrapper.contractDetails(int(reqId), cd)
@@ -402,61 +583,52 @@ class Decoder:
     def bondContractDetails(self, fields: list[Any]) -> None:
         cd = ContractDetails()
         cd.contract = c = Contract()
+        it = iter(fields)
+        get = it.__next__
         if self.serverVersion < 164:
-            fields.pop(0)
-        (
-            _,
-            reqId,
-            c.symbol,
-            c.secType,
-            cd.cusip,
-            cd.coupon,
-            lastTimes,
-            cd.issueDate,
-            cd.ratings,
-            cd.bondType,
-            cd.couponType,
-            cd.convertible,
-            cd.callable,
-            cd.putable,
-            cd.descAppend,
-            c.exchange,
-            c.currency,
-            cd.marketName,
-            c.tradingClass,
-            c.conId,
-            cd.minTick,
-            *fields) = fields
+            get()
+        get()  # msgId or version
+        reqId = get()
+        c.symbol = get()
+        c.secType = get()
+        cd.cusip = get()
+        cd.coupon = get()
+        lastTimes = get()
+        cd.issueDate = get()
+        cd.ratings = get()
+        cd.bondType = get()
+        cd.couponType = get()
+        cd.convertible = get()
+        cd.callable = get()
+        cd.putable = get()
+        cd.descAppend = get()
+        c.exchange = get()
+        c.currency = get()
+        cd.marketName = get()
+        c.tradingClass = get()
+        c.conId = get()
+        cd.minTick = get()
         if self.serverVersion < 164:
-            fields.pop(0)  # obsolete mdSizeMultiplier
-        (
-            cd.orderTypes,
-            cd.validExchanges,
-            cd.nextOptionDate,
-            cd.nextOptionType,
-            cd.nextOptionPartial,
-            cd.notes,
-            cd.longName,
-            cd.evRule,
-            cd.evMultiplier,
-            numSecIds,
-            *fields) = fields
-
-        numSecIds = int(numSecIds)
+            get()  # obsolete mdSizeMultiplier
+        cd.orderTypes = get()
+        cd.validExchanges = get()
+        cd.nextOptionDate = get()
+        cd.nextOptionType = get()
+        cd.nextOptionPartial = get()
+        cd.notes = get()
+        cd.longName = get()
+        cd.evRule = get()
+        cd.evMultiplier = get()
+        numSecIds = int(get())
         if numSecIds > 0:
-            cd.secIdList = []
-            for _ in range(numSecIds):
-                tag, value, *fields = fields
-                cd.secIdList += [TagValue(tag, value)]
+            cd.secIdList = [TagValue(get(), get()) for _ in range(numSecIds)]
 
-        cd.aggGroup, cd.marketRuleIds, *fields = fields
+        cd.aggGroup = get()
+        cd.marketRuleIds = get()
         if self.serverVersion >= 164:
-            (
-                cd.minSize,
-                cd.sizeIncrement,
-                cd.suggestedSizeIncrement,
-                # cd.minCashQtySize,
-                *fields) = fields
+            cd.minSize = get()
+            cd.sizeIncrement = get()
+            cd.suggestedSizeIncrement = get()
 
         times = lastTimes.split('-' if '-' in lastTimes else None)
         if len(times) > 0:
@@ -473,41 +645,40 @@ class Decoder:
     def execDetails(self, fields: list[Any]) -> None:
         c = Contract()
         ex = Execution()
-        (
-            _,
-            reqId,
-            ex.orderId,
-            c.conId,
-            c.symbol,
-            c.secType,
-            c.lastTradeDateOrContractMonth,
-            c.strike,
-            c.right,
-            c.multiplier,
-            c.exchange,
-            c.currency,
-            c.localSymbol,
-            c.tradingClass,
-            ex.execId,
-            timeStr,
-            ex.acctNumber,
-            ex.exchange,
-            ex.side,
-            ex.shares,
-            ex.price,
-            ex.permId,
-            ex.clientId,
-            ex.liquidation,
-            ex.cumQty,
-            ex.avgPrice,
-            ex.orderRef,
-            ex.evRule,
-            ex.evMultiplier,
-            ex.modelCode,
-            ex.lastLiquidity,
-            *fields) = fields
+        get = iter(fields).__next__
+        get()  # msgId
+        reqId = get()
+        ex.orderId = get()
+        c.conId = get()
+        c.symbol = get()
+        c.secType = get()
+        c.lastTradeDateOrContractMonth = get()
+        c.strike = get()
+        c.right = get()
+        c.multiplier = get()
+        c.exchange = get()
+        c.currency = get()
+        c.localSymbol = get()
+        c.tradingClass = get()
+        ex.execId = get()
+        timeStr = get()
+        ex.acctNumber = get()
+        ex.exchange = get()
+        ex.side = get()
+        ex.shares = get()
+        ex.price = get()
+        ex.permId = get()
+        ex.clientId = get()
+        ex.liquidation = get()
+        ex.cumQty = get()
+        ex.avgPrice = get()
+        ex.orderRef = get()
+        ex.evRule = get()
+        ex.evMultiplier = get()
+        ex.modelCode = get()
+        ex.lastLiquidity = get()
         if self.serverVersion >= 178:
-            ex.pendingPriceRevision, *fields = fields
+            ex.pendingPriceRevision = get()
 
         self.parse(c)
         self.parse(ex)
@@ -520,26 +691,30 @@ class Decoder:
         self.wrapper.execDetails(int(reqId), c, ex)
 
     def historicalData(self, fields: list[Any]) -> None:
-        _, reqId, startDateStr, endDateStr, numBars, *fields = fields
-        get = iter(fields).__next__
+        reqIdInt = int(fields[1])
+        startDateStr = fields[2]
+        endDateStr = fields[3]
+        numBars = int(fields[4])
+        histData = self.wrapper.historicalData
 
-        for _ in range(int(numBars)):
+        for i in range(5, 5 + numBars * 8, 8):
             bar = BarData(
-                date=get(),
-                open=float(get()),
-                high=float(get()),
-                low=float(get()),
-                close=float(get()),
-                volume=float(get()),
-                average=float(get()),
-                barCount=int(get()))
-            self.wrapper.historicalData(int(reqId), bar)
+                fields[i],
+                float(fields[i + 1]),
+                float(fields[i + 2]),
+                float(fields[i + 3]),
+                float(fields[i + 4]),
+                float(fields[i + 5]),
+                float(fields[i + 6]),
+                int(fields[i + 7]))
+            histData(reqIdInt, bar)
 
-        self.wrapper.historicalDataEnd(int(reqId), startDateStr, endDateStr)
+        self.wrapper.historicalDataEnd(reqIdInt, startDateStr, endDateStr)
 
     def historicalDataUpdate(self, fields: list[Any]) -> None:
-        _, reqId, *fields = fields
         get = iter(fields).__next__
+        get()  # msgId
+        reqId = int(get())
 
         bar = BarData(
             barCount=int(get() or 0),
@@ -551,48 +726,50 @@ class Decoder:
             average=float(get() or 0),
             volume=float(get() or 0))
 
-        self.wrapper.historicalDataUpdate(int(reqId), bar)
+        self.wrapper.historicalDataUpdate(reqId, bar)
 
     def scannerData(self, fields: list[Any]) -> None:
-        _, _, reqId, n, *fields = fields
+        get = iter(fields).__next__
+        get()  # msgId
+        get()  # version
+        reqIdInt = int(get())
+        n = int(get())
+        scanData = self.wrapper.scannerData
 
-        for _ in range(int(n)):
+        for _ in range(n):
             cd = ContractDetails()
             cd.contract = c = Contract()
-            (
-                rank,
-                c.conId,
-                c.symbol,
-                c.secType,
-                c.lastTradeDateOrContractMonth,
-                c.strike,
-                c.right,
-                c.exchange,
-                c.currency,
-                c.localSymbol,
-                cd.marketName,
-                c.tradingClass,
-                distance,
-                benchmark,
-                projection,
-                legsStr,
-                *fields) = fields
+            rank = get()
+            c.conId = get()
+            c.symbol = get()
+            c.secType = get()
+            c.lastTradeDateOrContractMonth = get()
+            c.strike = get()
+            c.right = get()
+            c.exchange = get()
+            c.currency = get()
+            c.localSymbol = get()
+            cd.marketName = get()
+            c.tradingClass = get()
+            distance = get()
+            benchmark = get()
+            projection = get()
+            legsStr = get()
 
             self.parse(cd)
             self.parse(c)
-            self.wrapper.scannerData(
-                int(reqId), int(rank), cd,
+            scanData(
+                reqIdInt, int(rank), cd,
                 distance, benchmark, projection, legsStr)
 
-        self.wrapper.scannerDataEnd(int(reqId))
+        self.wrapper.scannerDataEnd(reqIdInt)
 
     def tickOptionComputation(self, fields: list[Any]) -> None:
-        _, reqId, tickTypeInt, tickAttrib, *fields = fields
-        impliedVol, delta, optPrice, pvDividend, \
-            gamma, vega, theta, undPrice = fields
+        (_, reqId, tickTypeInt, tickAttrib, impliedVol, delta, optPrice,
+         pvDividend, gamma, vega, theta, undPrice) = fields
 
         self.wrapper.tickOptionComputation(
-            int(reqId), int(tickTypeInt), int(tickAttrib or 0),
+            int(reqId), int(tickTypeInt), int(tickAttrib) if tickAttrib else 0,
             float(impliedVol) if impliedVol else -1.0,
             float(delta) if delta else -2.0,
             float(optPrice) if optPrice else -1.0,
@@ -670,79 +847,88 @@ class Decoder:
 
     def securityDefinitionOptionParameter(self, fields: list[Any]) -> None:
         _, reqId, exchange, underlyingConId, tradingClass, multiplier, \
-            n, *fields = fields
+            n = fields[:7]
         n = int(n)
-
-        expirations = fields[:n]
-        strikes = [float(field) for field in fields[n + 1:]]
+        end = 7 + n
+        expirations = fields[7:end]
+        strikes = [float(field) for field in fields[end + 1:]]
 
         self.wrapper.securityDefinitionOptionParameter(
             int(reqId), exchange, int(underlyingConId or 0), tradingClass,
             multiplier, expirations, strikes)
 
     def softDollarTiers(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        reqId = int(get())
+        n = int(get())
 
         tiers = [
             SoftDollarTier(
                 name=get(),
                 val=get(),
                 displayName=get())
-            for _ in range(int(n))]
+            for _ in range(n)]
 
-        self.wrapper.softDollarTiers(int(reqId), tiers)
+        self.wrapper.softDollarTiers(reqId, tiers)
 
     def familyCodes(self, fields: list[Any]) -> None:
-        _, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        n = int(get())
 
         familyCodes = [
             FamilyCode(
                 accountID=get(),
                 familyCodeStr=get())
-            for _ in range(int(n))]
+            for _ in range(n)]
 
         self.wrapper.familyCodes(familyCodes)
 
     def symbolSamples(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
+        it = iter(fields)
+        get = it.__next__
+        get()  # msgId
+        reqId = int(get())
+        n = int(get())
 
         cds = []
-        for _ in range(int(n)):
+        for _ in range(n):
             cd = ContractDescription()
             cd.contract = c = Contract()
-            c.conId, c.symbol, c.secType, c.primaryExchange, c.currency, \
-                m, *fields = fields
-            c.conId = int(c.conId)
-            m = int(m)
-            cd.derivativeSecTypes = fields[:m]
-            fields = fields[m:]
+            c.conId = int(get())
+            c.symbol = get()
+            c.secType = get()
+            c.primaryExchange = get()
+            c.currency = get()
+            m = int(get())
+            cd.derivativeSecTypes = list(islice(it, m))
             if self.serverVersion >= 176:
-                (
-                    cd.contract.description,
-                    cd.contract.issuerId,
-                    *fields) = fields
+                c.description = get()
+                c.issuerId = get()
             cds.append(cd)
 
-        self.wrapper.symbolSamples(int(reqId), cds)
+        self.wrapper.symbolSamples(reqId, cds)
 
     def smartComponents(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        reqId = int(get())
+        n = int(get())
 
         components = [
             SmartComponent(
                 bitNumber=int(get()),
                 exchange=get(),
                 exchangeLetter=get())
-            for _ in range(int(n))]
+            for _ in range(n)]
 
-        self.wrapper.smartComponents(int(reqId), components)
+        self.wrapper.smartComponents(reqId, components)
 
     def mktDepthExchanges(self, fields: list[Any]) -> None:
-        _, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        n = int(get())
 
         descriptions = [
             DepthMktDataDescription(
@@ -751,394 +937,360 @@ class Decoder:
                 listingExch=get(),
                 serviceDataType=get(),
                 aggGroup=int(get()))
-            for _ in range(int(n))]
+            for _ in range(n)]
 
         self.wrapper.mktDepthExchanges(descriptions)
 
     def newsProviders(self, fields: list[Any]) -> None:
-        _, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        n = int(get())
 
         providers = [
             NewsProvider(
                 code=get(),
                 name=get())
-            for _ in range(int(n))]
+            for _ in range(n)]
 
         self.wrapper.newsProviders(providers)
 
     def histogramData(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        reqId = int(get())
+        n = int(get())
 
         histogram = [
             HistogramData(
                 price=float(get()),
                 count=int(get()))
-            for _ in range(int(n))]
+            for _ in range(n)]
 
-        self.wrapper.histogramData(int(reqId), histogram)
+        self.wrapper.histogramData(reqId, histogram)
 
     def marketRule(self, fields: list[Any]) -> None:
-        _, marketRuleId, n, *fields = fields
         get = iter(fields).__next__
+        get()
+        marketRuleId = int(get())
+        n = int(get())
 
         increments = [
             PriceIncrement(
                 lowEdge=float(get()),
                 increment=float(get()))
-            for _ in range(int(n))]
+            for _ in range(n)]
 
-        self.wrapper.marketRule(int(marketRuleId), increments)
+        self.wrapper.marketRule(marketRuleId, increments)
 
     def historicalTicks(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
-        get = iter(fields).__next__
+        reqId = int(fields[1])
+        n = int(fields[2])
+        end = 3 + n * 4
+        fromtimestamp = datetime.fromtimestamp
+        utc = timezone.utc
 
-        ticks = []
-        for _ in range(int(n)):
-            time = int(get())
-            get()
-            price = float(get())
-            size = float(get())
-            dt = datetime.fromtimestamp(time, timezone.utc)
-            ticks.append(
-                HistoricalTick(dt, price, size))
+        ticks: list[HistoricalTick] = [
+            HistoricalTick(
+                fromtimestamp(int(fields[i]), utc),
+                float(fields[i + 2]),
+                float(fields[i + 3]))
+            for i in range(3, end, 4)]
 
-        done = bool(int(get()))
-        self.wrapper.historicalTicks(int(reqId), ticks, done)
+        done = bool(int(fields[end]))
+        self.wrapper.historicalTicks(reqId, ticks, done)
 
     def historicalTicksBidAsk(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
-        get = iter(fields).__next__
+        reqId = int(fields[1])
+        n = int(fields[2])
+        end = 3 + n * 6
+        fromtimestamp = datetime.fromtimestamp
+        utc = timezone.utc
 
-        ticks = []
-        for _ in range(int(n)):
-            time = int(get())
-            mask = int(get())
-            attrib = TickAttribBidAsk(
-                askPastHigh=bool(mask & 1),
-                bidPastLow=bool(mask & 2))
-            priceBid = float(get())
-            priceAsk = float(get())
-            sizeBid = float(get())
-            sizeAsk = float(get())
-            dt = datetime.fromtimestamp(time, timezone.utc)
-            ticks.append(
+        ticks: list[HistoricalTickBidAsk] = []
+        append = ticks.append
+        for i in range(3, end, 6):
+            mask = int(fields[i + 1])
+            append(
                 HistoricalTickBidAsk(
-                    dt, attrib, priceBid, priceAsk, sizeBid, sizeAsk))
+                    fromtimestamp(int(fields[i]), utc),
+                    TickAttribBidAsk(bool(mask & 2), bool(mask & 1)),
+                    float(fields[i + 2]),
+                    float(fields[i + 3]),
+                    float(fields[i + 4]),
+                    float(fields[i + 5])))
 
-        done = bool(int(get()))
-        self.wrapper.historicalTicksBidAsk(int(reqId), ticks, done)
+        done = bool(int(fields[end]))
+        self.wrapper.historicalTicksBidAsk(reqId, ticks, done)
 
     def historicalTicksLast(self, fields: list[Any]) -> None:
-        _, reqId, n, *fields = fields
-        get = iter(fields).__next__
+        reqId = int(fields[1])
+        n = int(fields[2])
+        end = 3 + n * 6
+        fromtimestamp = datetime.fromtimestamp
+        utc = timezone.utc
 
-        ticks = []
-        for _ in range(int(n)):
-            time = int(get())
-            mask = int(get())
-            attrib = TickAttribLast(
-                pastLimit=bool(mask & 1),
-                unreported=bool(mask & 2))
-            price = float(get())
-            size = float(get())
-            exchange = get()
-            specialConditions = get()
-            dt = datetime.fromtimestamp(time, timezone.utc)
-            ticks.append(
+        ticks: list[HistoricalTickLast] = []
+        append = ticks.append
+        for i in range(3, end, 6):
+            mask = int(fields[i + 1])
+            append(
                 HistoricalTickLast(
-                    dt, attrib, price, size, exchange, specialConditions))
+                    fromtimestamp(int(fields[i]), utc),
+                    TickAttribLast(bool(mask & 1), bool(mask & 2)),
+                    float(fields[i + 2]),
+                    float(fields[i + 3]),
+                    fields[i + 4],
+                    fields[i + 5]))
 
-        done = bool(int(get()))
-        self.wrapper.historicalTicksLast(int(reqId), ticks, done)
+        done = bool(int(fields[end]))
+        self.wrapper.historicalTicksLast(reqId, ticks, done)
 
     def tickByTick(self, fields: list[Any]) -> None:
-        _, reqId, tickType, time, *fields = fields
-        reqId = int(reqId)
-        tickType = int(tickType)
-        time = int(time)
+        reqId = int(fields[1])
+        tickType = int(fields[2])
+        time = int(fields[3])
 
         if tickType in (1, 2):
-            price, size, mask, exchange, specialConditions = fields
-            mask = int(mask)
-            attrib: Any = TickAttribLast(
-                pastLimit=bool(mask & 1),
-                unreported=bool(mask & 2))
+            mask = int(fields[6])
+            attrib: Any = TickAttribLast(bool(mask & 1), bool(mask & 2))
 
             self.wrapper.tickByTickAllLast(
-                reqId, tickType, time, float(price), float(size),
-                attrib, exchange, specialConditions)
+                reqId, tickType, time, float(fields[4]), float(fields[5]),
+                attrib, fields[7], fields[8])
 
         elif tickType == 3:
-            bidPrice, askPrice, bidSize, askSize, mask = fields
-            mask = int(mask)
-            attrib = TickAttribBidAsk(
-                bidPastLow=bool(mask & 1),
-                askPastHigh=bool(mask & 2))
+            mask = int(fields[8])
+            attrib = TickAttribBidAsk(bool(mask & 1), bool(mask & 2))
 
             self.wrapper.tickByTickBidAsk(
-                reqId, time, float(bidPrice), float(askPrice),
-                float(bidSize), float(askSize), attrib)
+                reqId, time, float(fields[4]), float(fields[5]),
+                float(fields[6]), float(fields[7]), attrib)
 
         elif tickType == 4:
-            midPoint, = fields
-
-            self.wrapper.tickByTickMidPoint(reqId, time, float(midPoint))
+            self.wrapper.tickByTickMidPoint(reqId, time, float(fields[4]))
 
     def openOrder(self, fields: list[Any]) -> None:
         o = Order()
         c = Contract()
         st = OrderState()
-        (
-            _,
-            o.orderId,
-            c.conId,
-            c.symbol,
-            c.secType,
-            c.lastTradeDateOrContractMonth,
-            c.strike,
-            c.right,
-            c.multiplier,
-            c.exchange,
-            c.currency,
-            c.localSymbol,
-            c.tradingClass,
-            o.action,
-            o.totalQuantity,
-            o.orderType,
-            o.lmtPrice,
-            o.auxPrice,
-            o.tif,
-            o.ocaGroup,
-            o.account,
-            o.openClose,
-            o.origin,
-            o.orderRef,
-            o.clientId,
-            o.permId,
-            o.outsideRth,
-            o.hidden,
-            o.discretionaryAmt,
-            o.goodAfterTime,
-            _,
-            o.faGroup,
-            o.faMethod,
-            o.faPercentage,
-            *fields) = fields
+        it = iter(fields)
+        get = it.__next__
+
+        get()  # msgId
+        o.orderId = get()
+        c.conId = get()
+        c.symbol = get()
+        c.secType = get()
+        c.lastTradeDateOrContractMonth = get()
+        c.strike = get()
+        c.right = get()
+        c.multiplier = get()
+        c.exchange = get()
+        c.currency = get()
+        c.localSymbol = get()
+        c.tradingClass = get()
+        o.action = get()
+        o.totalQuantity = get()
+        o.orderType = get()
+        o.lmtPrice = get()
+        o.auxPrice = get()
+        o.tif = get()
+        o.ocaGroup = get()
+        o.account = get()
+        o.openClose = get()
+        o.origin = get()
+        o.orderRef = get()
+        o.clientId = get()
+        o.permId = get()
+        o.outsideRth = get()
+        o.hidden = get()
+        o.discretionaryAmt = get()
+        o.goodAfterTime = get()
+        get()  # sharesAllocation
+        o.faGroup = get()
+        o.faMethod = get()
+        o.faPercentage = get()
         if self.serverVersion < 177:
-            o.faProfile, *fields = fields
-        (
-            o.modelCode,
-            o.goodTillDate,
-            o.rule80A,
-            o.percentOffset,
-            o.settlingFirm,
-            o.shortSaleSlot,
-            o.designatedLocation,
-            o.exemptCode,
-            o.auctionStrategy,
-            o.startingPrice,
-            o.stockRefPrice,
-            o.delta,
-            o.stockRangeLower,
-            o.stockRangeUpper,
-            o.displaySize,
-            o.blockOrder,
-            o.sweepToFill,
-            o.allOrNone,
-            o.minQty,
-            o.ocaType,
-            o.eTradeOnly,
-            o.firmQuoteOnly,
-            o.nbboPriceCap,
-            o.parentId,
-            o.triggerMethod,
-            o.volatility,
-            o.volatilityType,
-            o.deltaNeutralOrderType,
-            o.deltaNeutralAuxPrice,
-            *fields) = fields
+            o.faProfile = get()
+        o.modelCode = get()
+        o.goodTillDate = get()
+        o.rule80A = get()
+        o.percentOffset = get()
+        o.settlingFirm = get()
+        o.shortSaleSlot = get()
+        o.designatedLocation = get()
+        o.exemptCode = get()
+        o.auctionStrategy = get()
+        o.startingPrice = get()
+        o.stockRefPrice = get()
+        o.delta = get()
+        o.stockRangeLower = get()
+        o.stockRangeUpper = get()
+        o.displaySize = get()
+        o.blockOrder = get()
+        o.sweepToFill = get()
+        o.allOrNone = get()
+        o.minQty = get()
+        o.ocaType = get()
+        o.eTradeOnly = get()
+        o.firmQuoteOnly = get()
+        o.nbboPriceCap = get()
+        o.parentId = get()
+        o.triggerMethod = get()
+        o.volatility = get()
+        o.volatilityType = get()
+        o.deltaNeutralOrderType = get()
+        o.deltaNeutralAuxPrice = get()
 
         if o.deltaNeutralOrderType:
-            (
-                o.deltaNeutralConId,
-                o.deltaNeutralSettlingFirm,
-                o.deltaNeutralClearingAccount,
-                o.deltaNeutralClearingIntent,
-                o.deltaNeutralOpenClose,
-                o.deltaNeutralShortSale,
-                o.deltaNeutralShortSaleSlot,
-                o.deltaNeutralDesignatedLocation,
-                *fields) = fields
-        (
-            o.continuousUpdate,
-            o.referencePriceType,
-            o.trailStopPrice,
-            o.trailingPercent,
-            o.basisPoints,
-            o.basisPointsType,
-            c.comboLegsDescrip,
-            *fields) = fields
+            o.deltaNeutralConId = get()
+            o.deltaNeutralSettlingFirm = get()
+            o.deltaNeutralClearingAccount = get()
+            o.deltaNeutralClearingIntent = get()
+            o.deltaNeutralOpenClose = get()
+            o.deltaNeutralShortSale = get()
+            o.deltaNeutralShortSaleSlot = get()
+            o.deltaNeutralDesignatedLocation = get()
 
-        numLegs = int(fields.pop(0))
+        o.continuousUpdate = get()
+        o.referencePriceType = get()
+        o.trailStopPrice = get()
+        o.trailingPercent = get()
+        o.basisPoints = get()
+        o.basisPointsType = get()
+        c.comboLegsDescrip = get()
+
+        numLegs = int(get())
         c.comboLegs = []
         for _ in range(numLegs):
             leg: Any = ComboLeg()
-            (
-                leg.conId,
-                leg.ratio,
-                leg.action,
-                leg.exchange,
-                leg.openClose,
-                leg.shortSaleSlot,
-                leg.designatedLocation,
-                leg.exemptCode,
-                *fields) = fields
+            leg.conId = get()
+            leg.ratio = get()
+            leg.action = get()
+            leg.exchange = get()
+            leg.openClose = get()
+            leg.shortSaleSlot = get()
+            leg.designatedLocation = get()
+            leg.exemptCode = get()
             self.parse(leg)
             c.comboLegs.append(leg)
 
-        numOrderLegs = int(fields.pop(0))
+        numOrderLegs = int(get())
         o.orderComboLegs = []
         for _ in range(numOrderLegs):
             leg = OrderComboLeg()
-            leg.price = fields.pop(0)
+            leg.price = get()
             self.parse(leg)
             o.orderComboLegs.append(leg)
 
-        numParams = int(fields.pop(0))
+        numParams = int(get())
         if numParams > 0:
-            o.smartComboRoutingParams = []
-            for _ in range(numParams):
-                tag, value, *fields = fields
-                o.smartComboRoutingParams.append(
-                    TagValue(tag, value))
+            o.smartComboRoutingParams = [
+                TagValue(get(), get()) for _ in range(numParams)]
 
-        (
-            o.scaleInitLevelSize,
-            o.scaleSubsLevelSize,
-            increment,
-            *fields) = fields
+        o.scaleInitLevelSize = get()
+        o.scaleSubsLevelSize = get()
+        increment = get()
 
         o.scalePriceIncrement = float(increment or UNSET_DOUBLE)
         if 0 < o.scalePriceIncrement < UNSET_DOUBLE:
-            (
-                o.scalePriceAdjustValue,
-                o.scalePriceAdjustInterval,
-                o.scaleProfitOffset,
-                o.scaleAutoReset,
-                o.scaleInitPosition,
-                o.scaleInitFillQty,
-                o.scaleRandomPercent,
-                *fields) = fields
+            o.scalePriceAdjustValue = get()
+            o.scalePriceAdjustInterval = get()
+            o.scaleProfitOffset = get()
+            o.scaleAutoReset = get()
+            o.scaleInitPosition = get()
+            o.scaleInitFillQty = get()
+            o.scaleRandomPercent = get()
 
-        o.hedgeType = fields.pop(0)
+        o.hedgeType = get()
         if o.hedgeType:
-            o.hedgeParam = fields.pop(0)
+            o.hedgeParam = get()
 
-        (
-            o.optOutSmartRouting,
-            o.clearingAccount,
-            o.clearingIntent,
-            o.notHeld,
-            dncPresent,
-            *fields) = fields
+        o.optOutSmartRouting = get()
+        o.clearingAccount = get()
+        o.clearingIntent = get()
+        o.notHeld = get()
+        dncPresent = get()
 
         if int(dncPresent):
-            conId, delta, price, *fields = fields
             c.deltaNeutralContract = DeltaNeutralContract(
-                int(conId or 0), float(delta or 0), float(price or 0))
+                int(get() or 0), float(get() or 0), float(get() or 0))
 
-        o.algoStrategy = fields.pop(0)
+        o.algoStrategy = get()
         if o.algoStrategy:
-            numParams = int(fields.pop(0))
+            numParams = int(get())
             if numParams > 0:
-                o.algoParams = []
-                for _ in range(numParams):
-                    tag, value, *fields = fields
-                    o.algoParams.append(
-                        TagValue(tag, value))
+                o.algoParams = [
+                    TagValue(get(), get()) for _ in range(numParams)]
 
-        (
-            o.solicited,
-            o.whatIf,
-            st.status,
-            st.initMarginBefore,
-            st.maintMarginBefore,
-            st.equityWithLoanBefore,
-            st.initMarginChange,
-            st.maintMarginChange,
-            st.equityWithLoanChange,
-            st.initMarginAfter,
-            st.maintMarginAfter,
-            st.equityWithLoanAfter,
-            st.commission,
-            st.minCommission,
-            st.maxCommission,
-            st.commissionCurrency,
-            st.warningText,
-            o.randomizeSize,
-            o.randomizePrice,
-            *fields) = fields
+        o.solicited = get()
+        o.whatIf = get()
+        st.status = get()
+        st.initMarginBefore = get()
+        st.maintMarginBefore = get()
+        st.equityWithLoanBefore = get()
+        st.initMarginChange = get()
+        st.maintMarginChange = get()
+        st.equityWithLoanChange = get()
+        st.initMarginAfter = get()
+        st.maintMarginAfter = get()
+        st.equityWithLoanAfter = get()
+        st.commission = get()
+        st.minCommission = get()
+        st.maxCommission = get()
+        st.commissionCurrency = get()
+        st.warningText = get()
+        o.randomizeSize = get()
+        o.randomizePrice = get()
 
         if o.orderType in ('PEG BENCH', 'PEGBENCH'):
-            (
-                o.referenceContractId,
-                o.isPeggedChangeAmountDecrease,
-                o.peggedChangeAmount,
-                o.referenceChangeAmount,
-                o.referenceExchangeId,
-                *fields) = fields
+            o.referenceContractId = get()
+            o.isPeggedChangeAmountDecrease = get()
+            o.peggedChangeAmount = get()
+            o.referenceChangeAmount = get()
+            o.referenceExchangeId = get()
 
-        numConditions = int(fields.pop(0))
+        numConditions = int(get())
         if numConditions > 0:
             for _ in range(numConditions):
-                condType = int(fields.pop(0))
+                condType = int(get())
                 condCls = OrderCondition.createClass(condType)
-                n = len(dataclasses.fields(condCls)) - 1
-                cond = condCls(condType, *fields[:n])
+                n = _get_condition_arity(condCls)
+                cond = condCls(condType, *islice(it, n))
                 self.parse(cond)
                 o.conditions.append(cond)
-                fields = fields[n:]
-            (
-                o.conditionsIgnoreRth,
-                o.conditionsCancelOrder,
-                *fields) = fields
+            o.conditionsIgnoreRth = get()
+            o.conditionsCancelOrder = get()
 
-        (
-            o.adjustedOrderType,
-            o.triggerPrice,
-            o.trailStopPrice,
-            o.lmtPriceOffset,
-            o.adjustedStopPrice,
-            o.adjustedStopLimitPrice,
-            o.adjustedTrailingAmount,
-            o.adjustableTrailingUnit,
-            o.softDollarTier.name,
-            o.softDollarTier.val,
-            o.softDollarTier.displayName,
-            o.cashQty,
-            o.dontUseAutoPriceForHedge,
-            o.isOmsContainer,
-            o.discretionaryUpToLimitPrice,
-            o.usePriceMgmtAlgo,
-            *fields) = fields
+        o.adjustedOrderType = get()
+        o.triggerPrice = get()
+        o.trailStopPrice = get()
+        o.lmtPriceOffset = get()
+        o.adjustedStopPrice = get()
+        o.adjustedStopLimitPrice = get()
+        o.adjustedTrailingAmount = get()
+        o.adjustableTrailingUnit = get()
+        o.softDollarTier.name = get()
+        o.softDollarTier.val = get()
+        o.softDollarTier.displayName = get()
+        o.cashQty = get()
+        o.dontUseAutoPriceForHedge = get()
+        o.isOmsContainer = get()
+        o.discretionaryUpToLimitPrice = get()
+        o.usePriceMgmtAlgo = get()
 
         if self.serverVersion >= 159:
-            o.duration = fields.pop(0)
+            o.duration = get()
         if self.serverVersion >= 160:
-            o.postToAts = fields.pop(0)
+            o.postToAts = get()
         if self.serverVersion >= 162:
-            o.autoCancelParent = fields.pop(0)
+            o.autoCancelParent = get()
         if self.serverVersion >= 170:
-            (
-                o.minTradeQty,
-                o.minCompeteSize,
-                o.competeAgainstBestOffset,
-                o.midOffsetAtWhole,
-                o.midOffsetAtHalf,
-                *fields) = fields
+            o.minTradeQty = get()
+            o.minCompeteSize = get()
+            o.competeAgainstBestOffset = get()
+            o.midOffsetAtWhole = get()
+            o.midOffsetAtHalf = get()
 
         self.parse(c)
         self.parse(o)
@@ -1149,215 +1301,186 @@ class Decoder:
         o = Order()
         c = Contract()
         st = OrderState()
+        it = iter(fields)
+        get = it.__next__
 
-        (
-            _,
-            c.conId,
-            c.symbol,
-            c.secType,
-            c.lastTradeDateOrContractMonth,
-            c.strike,
-            c.right,
-            c.multiplier,
-            c.exchange,
-            c.currency,
-            c.localSymbol,
-            c.tradingClass,
-            o.action,
-            o.totalQuantity,
-            o.orderType,
-            o.lmtPrice,
-            o.auxPrice,
-            o.tif,
-            o.ocaGroup,
-            o.account,
-            o.openClose,
-            o.origin,
-            o.orderRef,
-            o.permId,
-            o.outsideRth,
-            o.hidden,
-            o.discretionaryAmt,
-            o.goodAfterTime,
-            o.faGroup,
-            o.faMethod,
-            o.faPercentage,
-            *fields) = fields
+        get()  # msgId
+        c.conId = get()
+        c.symbol = get()
+        c.secType = get()
+        c.lastTradeDateOrContractMonth = get()
+        c.strike = get()
+        c.right = get()
+        c.multiplier = get()
+        c.exchange = get()
+        c.currency = get()
+        c.localSymbol = get()
+        c.tradingClass = get()
+        o.action = get()
+        o.totalQuantity = get()
+        o.orderType = get()
+        o.lmtPrice = get()
+        o.auxPrice = get()
+        o.tif = get()
+        o.ocaGroup = get()
+        o.account = get()
+        o.openClose = get()
+        o.origin = get()
+        o.orderRef = get()
+        o.permId = get()
+        o.outsideRth = get()
+        o.hidden = get()
+        o.discretionaryAmt = get()
+        o.goodAfterTime = get()
+        o.faGroup = get()
+        o.faMethod = get()
+        o.faPercentage = get()
         if self.serverVersion < 177:
-            o.faProfile, *fields = fields
-        (
-            o.modelCode,
-            o.goodTillDate,
-            o.rule80A,
-            o.percentOffset,
-            o.settlingFirm,
-            o.shortSaleSlot,
-            o.designatedLocation,
-            o.exemptCode,
-            o.startingPrice,
-            o.stockRefPrice,
-            o.delta,
-            o.stockRangeLower,
-            o.stockRangeUpper,
-            o.displaySize,
-            o.sweepToFill,
-            o.allOrNone,
-            o.minQty,
-            o.ocaType,
-            o.triggerMethod,
-            o.volatility,
-            o.volatilityType,
-            o.deltaNeutralOrderType,
-            o.deltaNeutralAuxPrice,
-            *fields) = fields
+            o.faProfile = get()
+        o.modelCode = get()
+        o.goodTillDate = get()
+        o.rule80A = get()
+        o.percentOffset = get()
+        o.settlingFirm = get()
+        o.shortSaleSlot = get()
+        o.designatedLocation = get()
+        o.exemptCode = get()
+        o.startingPrice = get()
+        o.stockRefPrice = get()
+        o.delta = get()
+        o.stockRangeLower = get()
+        o.stockRangeUpper = get()
+        o.displaySize = get()
+        o.sweepToFill = get()
+        o.allOrNone = get()
+        o.minQty = get()
+        o.ocaType = get()
+        o.triggerMethod = get()
+        o.volatility = get()
+        o.volatilityType = get()
+        o.deltaNeutralOrderType = get()
+        o.deltaNeutralAuxPrice = get()
 
         if o.deltaNeutralOrderType:
-            (
-                o.deltaNeutralConId,
-                o.deltaNeutralShortSale,
-                o.deltaNeutralShortSaleSlot,
-                o.deltaNeutralDesignatedLocation,
-                *fields) = fields
-        (
-            o.continuousUpdate,
-            o.referencePriceType,
-            o.trailStopPrice,
-            o.trailingPercent,
-            c.comboLegsDescrip,
-            *fields) = fields
+            o.deltaNeutralConId = get()
+            o.deltaNeutralShortSale = get()
+            o.deltaNeutralShortSaleSlot = get()
+            o.deltaNeutralDesignatedLocation = get()
 
-        numLegs = int(fields.pop(0))
+        o.continuousUpdate = get()
+        o.referencePriceType = get()
+        o.trailStopPrice = get()
+        o.trailingPercent = get()
+        c.comboLegsDescrip = get()
+
+        numLegs = int(get())
         c.comboLegs = []
         for _ in range(numLegs):
             leg: Any = ComboLeg()
-            (
-                leg.conId,
-                leg.ratio,
-                leg.action,
-                leg.exchange,
-                leg.openClose,
-                leg.shortSaleSlot,
-                leg.designatedLocation,
-                leg.exemptCode,
-                *fields) = fields
+            leg.conId = get()
+            leg.ratio = get()
+            leg.action = get()
+            leg.exchange = get()
+            leg.openClose = get()
+            leg.shortSaleSlot = get()
+            leg.designatedLocation = get()
+            leg.exemptCode = get()
             self.parse(leg)
             c.comboLegs.append(leg)
 
-        numOrderLegs = int(fields.pop(0))
+        numOrderLegs = int(get())
         o.orderComboLegs = []
         for _ in range(numOrderLegs):
             leg = OrderComboLeg()
-            leg.price = fields.pop(0)
+            leg.price = get()
             self.parse(leg)
             o.orderComboLegs.append(leg)
 
-        numParams = int(fields.pop(0))
+        numParams = int(get())
         if numParams > 0:
-            o.smartComboRoutingParams = []
-            for _ in range(numParams):
-                tag, value, *fields = fields
-                o.smartComboRoutingParams.append(
-                    TagValue(tag, value))
-        (
-            o.scaleInitLevelSize,
-            o.scaleSubsLevelSize,
-            increment,
-            *fields) = fields
+            o.smartComboRoutingParams = [
+                TagValue(get(), get()) for _ in range(numParams)]
+
+        o.scaleInitLevelSize = get()
+        o.scaleSubsLevelSize = get()
+        increment = get()
 
         o.scalePriceIncrement = float(increment or UNSET_DOUBLE)
         if 0 < o.scalePriceIncrement < UNSET_DOUBLE:
-            (
-                o.scalePriceAdjustValue,
-                o.scalePriceAdjustInterval,
-                o.scaleProfitOffset,
-                o.scaleAutoReset,
-                o.scaleInitPosition,
-                o.scaleInitFillQty,
-                o.scaleRandomPercent,
-                *fields) = fields
+            o.scalePriceAdjustValue = get()
+            o.scalePriceAdjustInterval = get()
+            o.scaleProfitOffset = get()
+            o.scaleAutoReset = get()
+            o.scaleInitPosition = get()
+            o.scaleInitFillQty = get()
+            o.scaleRandomPercent = get()
 
-        o.hedgeType = fields.pop(0)
+        o.hedgeType = get()
         if o.hedgeType:
-            o.hedgeParam = fields.pop(0)
+            o.hedgeParam = get()
 
-        (
-            o.clearingAccount,
-            o.clearingIntent,
-            o.notHeld,
-            dncPresent,
-            *fields) = fields
+        o.clearingAccount = get()
+        o.clearingIntent = get()
+        o.notHeld = get()
+        dncPresent = get()
 
         if int(dncPresent):
-            conId, delta, price, *fields = fields
             c.deltaNeutralContract = DeltaNeutralContract(
-                int(conId or 0), float(delta or 0), float(price or 0))
+                int(get() or 0), float(get() or 0), float(get() or 0))
 
-        o.algoStrategy = fields.pop(0)
+        o.algoStrategy = get()
         if o.algoStrategy:
-            numParams = int(fields.pop(0))
+            numParams = int(get())
             if numParams > 0:
-                o.algoParams = []
-                for _ in range(numParams):
-                    tag, value, *fields = fields
-                    o.algoParams.append(
-                        TagValue(tag, value))
-        (
-            o.solicited,
-            st.status,
-            o.randomizeSize,
-            o.randomizePrice,
-            *fields) = fields
+                o.algoParams = [
+                    TagValue(get(), get()) for _ in range(numParams)]
+
+        o.solicited = get()
+        st.status = get()
+        o.randomizeSize = get()
+        o.randomizePrice = get()
 
         if o.orderType in ('PEG BENCH', 'PEGBENCH'):
-            (
-                o.referenceContractId,
-                o.isPeggedChangeAmountDecrease,
-                o.peggedChangeAmount,
-                o.referenceChangeAmount,
-                o.referenceExchangeId,
-                *fields) = fields
+            o.referenceContractId = get()
+            o.isPeggedChangeAmountDecrease = get()
+            o.peggedChangeAmount = get()
+            o.referenceChangeAmount = get()
+            o.referenceExchangeId = get()
 
-        numConditions = int(fields.pop(0))
+        numConditions = int(get())
         if numConditions > 0:
             for _ in range(numConditions):
-                condType = int(fields.pop(0))
+                condType = int(get())
                 condCls = OrderCondition.createClass(condType)
-                n = len(dataclasses.fields(condCls)) - 1
-                cond = condCls(condType, *fields[:n])
+                n = _get_condition_arity(condCls)
+                cond = condCls(condType, *islice(it, n))
                 self.parse(cond)
                 o.conditions.append(cond)
-                fields = fields[n:]
-            (
-                o.conditionsIgnoreRth,
-                o.conditionsCancelOrder,
-                *fields) = fields
+            o.conditionsIgnoreRth = get()
+            o.conditionsCancelOrder = get()
 
-        (
-            o.trailStopPrice,
-            o.lmtPriceOffset,
-            o.cashQty,
-            o.dontUseAutoPriceForHedge,
-            o.isOmsContainer,
-            o.autoCancelDate,
-            o.filledQuantity,
-            o.refFuturesConId,
-            o.autoCancelParent,
-            o.shareholder,
-            o.imbalanceOnly,
-            o.routeMarketableToBbo,
-            o.parentPermId,
-            st.completedTime,
-            st.completedStatus,
-            *fields) = fields
+        o.trailStopPrice = get()
+        o.lmtPriceOffset = get()
+        o.cashQty = get()
+        o.dontUseAutoPriceForHedge = get()
+        o.isOmsContainer = get()
+        o.autoCancelDate = get()
+        o.filledQuantity = get()
+        o.refFuturesConId = get()
+        o.autoCancelParent = get()
+        o.shareholder = get()
+        o.imbalanceOnly = get()
+        o.routeMarketableToBbo = get()
+        o.parentPermId = get()
+        st.completedTime = get()
+        st.completedStatus = get()
 
         if self.serverVersion >= 170:
-            (
-                o.minTradeQty,
-                o.minCompeteSize,
-                o.competeAgainstBestOffset,
-                o.midOffsetAtWhole,
-                o.midOffsetAtHalf,
-                *fields) = fields
+            o.minTradeQty = get()
+            o.minCompeteSize = get()
+            o.competeAgainstBestOffset = get()
+            o.midOffsetAtWhole = get()
+            o.midOffsetAtHalf = get()
 
         self.parse(c)
         self.parse(o)
@@ -1365,16 +1488,15 @@ class Decoder:
         self.wrapper.completedOrder(c, o, st)
 
     def historicalSchedule(self, fields: list[Any]) -> None:
-        (
-            _,
-            reqId,
-            startDateTime,
-            endDateTime,
-            timeZone,
-            count, *fields) = fields
         get = iter(fields).__next__
+        get()  # msgId
+        reqId = int(get())
+        startDateTime = get()
+        endDateTime = get()
+        timeZone = get()
+        count = int(get())
         sessions = [HistoricalSession(
             startDateTime=get(), endDateTime=get(), refDate=get())
-            for _ in range(int(count))]
+            for _ in range(count)]
         self.wrapper.historicalSchedule(
-            int(reqId), startDateTime, endDateTime, timeZone, sessions)
+            reqId, startDateTime, endDateTime, timeZone, sessions)

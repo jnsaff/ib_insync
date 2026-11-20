@@ -37,7 +37,7 @@ class ScannerSubscription:
     stockTypeFilter: str = ''
 
 
-@dataclass
+@dataclass(slots=True)
 class SoftDollarTier:
     name: str = ''
     val: str = ''
@@ -47,7 +47,7 @@ class SoftDollarTier:
         return bool(self.name or self.val or self.displayName)
 
 
-@dataclass
+@dataclass(slots=True)
 class Execution:
     execId: str = ''
     time: datetime = field(default=EPOCH)
@@ -70,7 +70,7 @@ class Execution:
     pendingPriceRevision: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class CommissionReport:
     execId: str = ''
     commission: float = 0.0
@@ -91,7 +91,7 @@ class ExecutionFilter:
     side: str = ''
 
 
-@dataclass
+@dataclass(slots=True)
 class BarData:
     date: date_ | datetime = EPOCH
     open: float = 0.0
@@ -103,7 +103,7 @@ class BarData:
     barCount: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class RealTimeBar:
     time: datetime = EPOCH
     endTime: int = -1
@@ -116,38 +116,38 @@ class RealTimeBar:
     count: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class TickAttrib:
     canAutoExecute: bool = False
     pastLimit: bool = False
     preOpen: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class TickAttribBidAsk:
     bidPastLow: bool = False
     askPastHigh: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class TickAttribLast:
     pastLimit: bool = False
     unreported: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class HistogramData:
     price: float = 0.0
     count: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class NewsProvider:
     code: str = ''
     name: str = ''
 
 
-@dataclass
+@dataclass(slots=True)
 class DepthMktDataDescription:
     exchange: str = ''
     secType: str = ''
@@ -165,7 +165,7 @@ class PnL:
     realizedPnL: float = nan
 
 
-@dataclass
+@dataclass(slots=True)
 class TradeLogEntry:
     time: datetime
     status: str = ''
@@ -185,7 +185,7 @@ class PnLSingle:
     value: float = nan
 
 
-@dataclass
+@dataclass(slots=True)
 class HistoricalSession:
     startDateTime: str = ''
     endDateTime: str = ''
