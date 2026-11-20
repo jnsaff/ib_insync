@@ -81,7 +81,8 @@ python -m build
 
 ## Configuration Files
 
-- `pyproject.toml`: PEP 621 package metadata, dependencies, pytest, and MyPy configuration
+- `pyproject.toml`: PEP 621 package metadata, dependencies, pytest, and strict MyPy (`strict = true`, `mypy_path = "stubs"`) configuration
+- `stubs/`: Type stubs for third-party packages without `py.typed` (`eventkit`, `nest_asyncio`)
 - `.flake8`: Flake8 configuration ignoring specific docstring and formatting rules
 - `requirements.txt` / `requirements-dev.txt`: Runtime and development dependency lists
 

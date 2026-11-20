@@ -1,8 +1,9 @@
 """Access to realtime market information."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import ClassVar, List, Optional, Union
+from typing import Any, ClassVar
 
 from eventkit import Event, Op
 
@@ -39,10 +40,10 @@ class Ticker:
         * ``updateEvent`` (ticker: :class:`.Ticker`)
     """
 
-    events: ClassVar = ('updateEvent',)
+    events: ClassVar[tuple[str, ...]] = ('updateEvent',)
 
-    contract: Optional[Contract] = None
-    time: Optional[datetime] = None
+    contract: Contract | None = None
+    time: datetime | None = None
     marketDataType: int = 1
     minTick: float = nan
     bid: float = nan
@@ -80,7 +81,7 @@ class Ticker:
     rtHistVolatility: float = nan
     rtVolume: float = nan
     rtTradeVolume: float = nan
-    rtTime: Optional[datetime] = None
+    rtTime: datetime | None = None
     avVolume: float = nan
     tradeCount: float = nan
     tradeRate: float = nan
@@ -95,19 +96,19 @@ class Ticker:
     avOptionVolume: float = nan
     histVolatility: float = nan
     impliedVolatility: float = nan
-    dividends: Optional[Dividends] = None
-    fundamentalRatios: Optional[FundamentalRatios] = None
-    ticks: List[TickData] = field(default_factory=list)
-    tickByTicks: List[Union[
-        TickByTickAllLast, TickByTickBidAsk, TickByTickMidPoint]] = \
+    dividends: Dividends | None = None
+    fundamentalRatios: FundamentalRatios | None = None
+    ticks: list[TickData] = field(default_factory=list)
+    tickByTicks: list[
+        TickByTickAllLast | TickByTickBidAsk | TickByTickMidPoint] = \
         field(default_factory=list)
-    domBids: List[DOMLevel] = field(default_factory=list)
-    domAsks: List[DOMLevel] = field(default_factory=list)
-    domTicks: List[MktDepthData] = field(default_factory=list)
-    bidGreeks: Optional[OptionComputation] = None
-    askGreeks: Optional[OptionComputation] = None
-    lastGreeks: Optional[OptionComputation] = None
-    modelGreeks: Optional[OptionComputation] = None
+    domBids: list[DOMLevel] = field(default_factory=list)
+    domAsks: list[DOMLevel] = field(default_factory=list)
+    domTicks: list[MktDepthData] = field(default_factory=list)
+    bidGreeks: OptionComputation | None = None
+    askGreeks: OptionComputation | None = None
+    lastGreeks: OptionComputation | None = None
+    modelGreeks: OptionComputation | None = None
     auctionVolume: float = nan
     auctionPrice: float = nan
     auctionImbalance: float = nan
@@ -115,13 +116,13 @@ class Ticker:
     bboExchange: str = ''
     snapshotPermissions: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.updateEvent = TickerUpdateEvent('updateEvent')
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return self is other
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return id(self)
 
     __repr__ = dataclassRepr
@@ -186,11 +187,13 @@ class Tickfilter(Op):
 
     __slots__ = ('_tickTypes',)
 
-    def __init__(self, tickTypes, source=None):
+    def __init__(
+            self, tickTypes: Iterable[int],
+            source: Event | None = None) -> None:
         Op.__init__(self, source)
         self._tickTypes = set(tickTypes)
 
-    def on_source(self, ticker):
+    def on_source(self, ticker: Ticker) -> None:
         for t in ticker.ticks:
             if t.tickType in self._tickTypes:
                 self.emit(t.time, t.price, t.size)
@@ -239,14 +242,14 @@ class Tickfilter(Op):
 class Midpoints(Tickfilter):
     __slots__ = ()
 
-    def on_source(self, ticker):
+    def on_source(self, ticker: Ticker) -> None:
         if ticker.ticks and ticker.hasBidAsk():
             self.emit(ticker.time, ticker.midpoint(), 0)
 
 
 @dataclass
 class Bar:
-    time: Optional[datetime]
+    time: datetime | None
     open: float = nan
     high: float = nan
     low: float = nan
@@ -255,16 +258,16 @@ class Bar:
     count: int = 0
 
 
-class BarList(List[Bar]):
+class BarList(list[Bar]):
 
-    def __init__(self, *args):
+    def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self.updateEvent = Event('updateEvent')
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return self is other
 
-    def __hash__(self):  # type: ignore[override]
+    def __hash__(self) -> int:  # type: ignore[override]
         return id(self)
 
 
@@ -273,14 +276,16 @@ class TimeBars(Op):
     __doc__ = Tickfilter.timebars.__doc__
 
     bars: BarList
+    _timer: Event | None
 
-    def __init__(self, timer, source=None):
+    def __init__(self, timer: Event, source: Event | None = None) -> None:
         Op.__init__(self, source)
         self._timer = timer
         self._timer.connect(self._on_timer, None, self._on_timer_done)
         self.bars = BarList()
 
-    def on_source(self, time, price, size):
+    def on_source(
+            self, time: datetime | None, price: float, size: float) -> None:
         if not self.bars or isNan(price):
             return
         if isNan(size):
@@ -295,7 +300,7 @@ class TimeBars(Op):
         bar.count += 1
         self.bars.updateEvent.emit(self.bars, False)
 
-    def _on_timer(self, time):
+    def _on_timer(self, time: datetime | None) -> None:
         if self.bars:
             bar = self.bars[-1]
             if isNan(bar.close) and len(self.bars) > 1:
@@ -305,7 +310,7 @@ class TimeBars(Op):
             self.emit(bar)
         self.bars.append(Bar(time))
 
-    def _on_timer_done(self, timer):
+    def _on_timer_done(self, timer: Event) -> None:
         self._timer = None
         self.set_done()
 
@@ -316,14 +321,15 @@ class TickBars(Op):
 
     bars: BarList
 
-    def __init__(self, count, source=None):
+    def __init__(self, count: int, source: Event | None = None) -> None:
         if count <= 0:
             raise ValueError('count must be > 0')
         Op.__init__(self, source)
         self._count = count
         self.bars = BarList()
 
-    def on_source(self, time, price, size):
+    def on_source(
+            self, time: datetime | None, price: float, size: float) -> None:
         if isNan(price):
             return
         if isNan(size):
@@ -349,14 +355,15 @@ class VolumeBars(Op):
 
     bars: BarList
 
-    def __init__(self, volume, source=None):
+    def __init__(self, volume: float, source: Event | None = None) -> None:
         if volume <= 0:
             raise ValueError('volume must be > 0')
         Op.__init__(self, source)
         self._volume = volume
         self.bars = BarList()
 
-    def on_source(self, time, price, size):
+    def on_source(
+            self, time: datetime | None, price: float, size: float) -> None:
         if isNan(price):
             return
         if isNan(size):

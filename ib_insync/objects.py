@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass, field
 from datetime import date as date_, datetime
-from typing import List, NamedTuple, Optional, Union
+from typing import Any, NamedTuple
 
 from eventkit import Event
 
-from .contract import Contract, ScanData, TagValue
+from .contract import Contract, ScanData, TagValue as TagValue
 from .util import EPOCH, UNSET_DOUBLE, UNSET_INTEGER
 
 nan = float('nan')
@@ -43,7 +43,7 @@ class SoftDollarTier:
     val: str = ''
     displayName: str = ''
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self.name or self.val or self.displayName)
 
 
@@ -93,7 +93,7 @@ class ExecutionFilter:
 
 @dataclass
 class BarData:
-    date: Union[date_, datetime] = EPOCH
+    date: date_ | datetime = EPOCH
     open: float = 0.0
     high: float = 0.0
     low: float = 0.0
@@ -197,7 +197,7 @@ class HistoricalSchedule:
     startDateTime: str = ''
     endDateTime: str = ''
     timeZone: str = ''
-    sessions: List[HistoricalSession] = field(default_factory=list)
+    sessions: list[HistoricalSession] = field(default_factory=list)
 
 
 @dataclass
@@ -323,14 +323,14 @@ class Fill(NamedTuple):
 
 class OptionComputation(NamedTuple):
     tickAttrib: int
-    impliedVol: Optional[float]
-    delta: Optional[float]
-    optPrice: Optional[float]
-    pvDividend: Optional[float]
-    gamma: Optional[float]
-    vega: Optional[float]
-    theta: Optional[float]
-    undPrice: Optional[float]
+    impliedVol: float | None
+    delta: float | None
+    optPrice: float | None
+    pvDividend: float | None
+    gamma: float | None
+    vega: float | None
+    theta: float | None
+    undPrice: float | None
 
 
 class OptionChain(NamedTuple):
@@ -338,15 +338,15 @@ class OptionChain(NamedTuple):
     underlyingConId: int
     tradingClass: str
     multiplier: str
-    expirations: List[str]
-    strikes: List[float]
+    expirations: list[str]
+    strikes: list[float]
 
 
 class Dividends(NamedTuple):
-    past12Months: Optional[float]
-    next12Months: Optional[float]
-    nextDate: Optional[date_]
-    nextAmount: Optional[float]
+    past12Months: float | None
+    next12Months: float | None
+    nextDate: date_ | None
+    nextAmount: float | None
 
 
 class NewsArticle(NamedTuple):
@@ -396,7 +396,7 @@ class ConnectionStats(NamedTuple):
     numMsgSent: int
 
 
-class BarDataList(List[BarData]):
+class BarDataList(list[BarData]):
     """
     List of :class:`.BarData` that also stores all request parameters.
 
@@ -408,27 +408,27 @@ class BarDataList(List[BarData]):
 
     reqId: int
     contract: Contract
-    endDateTime: Union[datetime, date_, str, None]
+    endDateTime: datetime | date_ | str | None
     durationStr: str
     barSizeSetting: str
     whatToShow: str
     useRTH: bool
     formatDate: int
     keepUpToDate: bool
-    chartOptions: List[TagValue]
+    chartOptions: list[TagValue]
 
-    def __init__(self, *args):
+    def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self.updateEvent = Event('updateEvent')
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return self is other
 
-    def __hash__(self):  # type: ignore[override]
+    def __hash__(self) -> int:  # type: ignore[override]
         return id(self)
 
 
-class RealTimeBarList(List[RealTimeBar]):
+class RealTimeBarList(list[RealTimeBar]):
     """
     List of :class:`.RealTimeBar` that also stores all request parameters.
 
@@ -443,20 +443,20 @@ class RealTimeBarList(List[RealTimeBar]):
     barSize: int
     whatToShow: str
     useRTH: bool
-    realTimeBarsOptions: List[TagValue]
+    realTimeBarsOptions: list[TagValue]
 
-    def __init__(self, *args):
+    def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self.updateEvent = Event('updateEvent')
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return self is other
 
-    def __hash__(self):  # type: ignore[override]
+    def __hash__(self) -> int:  # type: ignore[override]
         return id(self)
 
 
-class ScanDataList(List[ScanData]):
+class ScanDataList(list[ScanData]):
     """
     List of :class:`.ScanData` that also stores all request parameters.
 
@@ -466,26 +466,26 @@ class ScanDataList(List[ScanData]):
 
     reqId: int
     subscription: ScannerSubscription
-    scannerSubscriptionOptions: List[TagValue]
-    scannerSubscriptionFilterOptions: List[TagValue]
+    scannerSubscriptionOptions: list[TagValue]
+    scannerSubscriptionFilterOptions: list[TagValue]
 
-    def __init__(self, *args):
+    def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self.updateEvent = Event('updateEvent')
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return self is other
 
-    def __hash__(self):  # type: ignore[override]
+    def __hash__(self) -> int:  # type: ignore[override]
         return id(self)
 
 
 class DynamicObject:
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         self.__dict__.update(kwargs)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         clsName = self.__class__.__name__
         kwargs = ', '.join(f'{k}={v!r}' for k, v in self.__dict__.items())
         return f'{clsName}({kwargs})'
