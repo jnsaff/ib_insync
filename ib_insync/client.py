@@ -1,7 +1,6 @@
 """Socket client for communicating with Interactive Brokers."""
 
 import asyncio
-import io
 import logging
 import math
 import struct
@@ -21,6 +20,10 @@ from .util import UNSET_DOUBLE, UNSET_INTEGER, dataclassAsTuple, getLoop, run
 
 if TYPE_CHECKING:
     from .wrapper import Wrapper
+
+_HEADER_STRUCT = struct.Struct('>I')
+_pack_header = _HEADER_STRUCT.pack
+_unpack_header_from = _HEADER_STRUCT.unpack_from
 
 
 class Client:
@@ -126,7 +129,7 @@ class Client:
         self.connState = Client.DISCONNECTED
         self._apiReady = False
         self._serverVersion = 0
-        self._data = b''
+        self._data = bytearray()
         self._hasReqId = False
         self._reqIdSeq = 0
         self._accounts: list[str] = []
@@ -266,37 +269,43 @@ class Client:
         if not self.isConnected():
             raise ConnectionError('Not connected')
 
-        msg = io.StringIO()
-        empty: tuple[Any, ...] = (
-            (None, UNSET_INTEGER, UNSET_DOUBLE) if makeEmpty else (None,))
+        parts: list[str] = []
+        append = parts.append
         for field in fields:
             typ = type(field)
-            if field in empty:
-                s = ''
-            elif typ is str:
-                s = field
+            if typ is str:
+                append(field)
+            elif field is None:
+                append('')
             elif typ is int:
-                s = str(field)
+                append(
+                    '' if makeEmpty and field == UNSET_INTEGER
+                    else str(field))
             elif typ is float:
-                s = 'Infinite' if field == math.inf else str(field)
+                if makeEmpty and (
+                        field == UNSET_DOUBLE or field == UNSET_INTEGER):
+                    append('')
+                elif field == math.inf:
+                    append('Infinite')
+                else:
+                    append(str(field))
             elif typ is bool:
-                s = '1' if field else '0'
+                append('1' if field else '0')
             elif typ is list:
                 # list of TagValue
-                s = ''.join(f'{v.tag}={v.value};' for v in field)
+                append(''.join(f'{v.tag}={v.value};' for v in field))
             elif isinstance(field, Contract):
                 c = field
-                s = '\0'.join(str(f) for f in (
-                    c.conId, c.symbol, c.secType,
-                    c.lastTradeDateOrContractMonth, c.strike,
-                    c.right, c.multiplier, c.exchange,
-                    c.primaryExchange, c.currency,
-                    c.localSymbol, c.tradingClass))
+                append(
+                    f'{c.conId}\0{c.symbol}\0{c.secType}\0'
+                    f'{c.lastTradeDateOrContractMonth}\0{c.strike}\0'
+                    f'{c.right}\0{c.multiplier}\0{c.exchange}\0'
+                    f'{c.primaryExchange}\0{c.currency}\0'
+                    f'{c.localSymbol}\0{c.tradingClass}')
             else:
-                s = str(field)
-            msg.write(s)
-            msg.write('\0')
-        self.sendMsg(msg.getvalue())
+                append(str(field))
+        append('')
+        self.sendMsg('\0'.join(parts))
 
     def sendMsg(self, msg: str | None) -> None:
         loop = getLoop()
@@ -337,34 +346,44 @@ class Client:
 
     def _prefix(self, msg: bytes) -> bytes:
         # prefix a message with its length
-        return struct.pack('>I', len(msg)) + msg
+        return _pack_header(len(msg)) + msg
 
     def _onSocketHasData(self, data: bytes) -> None:
         debug = self._logger.isEnabledFor(logging.DEBUG)
         if self._tcpDataArrived:
             self._tcpDataArrived()
 
-        self._data += data
+        buf = self._data
         self._numBytesRecv += len(data)
+        if buf:
+            buf.extend(data)
+            view: bytes | bytearray = buf
+            using_buf = True
+        else:
+            view = data
+            using_buf = False
+        buf_len = len(view)
+        pos = 0
+        unpack_from = _unpack_header_from
+        max_msg_len = self.MaxMsgLen
+        interpret = self.decoder.interpret
 
-        while True:
-            if len(self._data) <= 4:
-                break
+        while buf_len - pos > 4:
             # 4 byte prefix tells the message length
-            msgLen = struct.unpack('>I', self._data[:4])[0]
-            if msgLen > self.MaxMsgLen:
-                self._data = b''
+            msgLen: int = unpack_from(view, pos)[0]
+            if msgLen > max_msg_len:
+                buf.clear()
                 self.conn.disconnect()
                 self._onSocketDisconnected(
                     f'Incoming message length {msgLen} exceeds maximum '
-                    f'{self.MaxMsgLen} bytes')
+                    f'{max_msg_len} bytes')
                 return
-            msgEnd = 4 + msgLen
-            if len(self._data) < msgEnd:
+            msgEnd = pos + 4 + msgLen
+            if buf_len < msgEnd:
                 # insufficient data for now
                 break
-            msg = self._data[4:msgEnd].decode(errors='backslashreplace')
-            self._data = self._data[msgEnd:]
+            msg = view[pos + 4:msgEnd].decode(errors='backslashreplace')
+            pos = msgEnd
             fields = msg.split('\0')
             fields.pop()  # pop off last empty element
             if not fields:
@@ -374,7 +393,9 @@ class Client:
             if debug:
                 self._logger.debug('<<< %s', ','.join(fields))
 
-            if not self._serverVersion and len(fields) == 2:
+            if self._apiReady:
+                interpret(fields)
+            elif not self._serverVersion and len(fields) == 2:
                 # this concludes the handshake
                 version, _connTime = fields
                 try:
@@ -397,28 +418,40 @@ class Client:
                 self._logger.info(
                     f'Logged on to server version {self._serverVersion}')
             else:
-                if not self._apiReady:
-                    # snoop for nextValidId and managedAccounts response,
-                    # when both are in then the client is ready
-                    try:
-                        msgId = int(fields[0])
-                        if msgId == 9:
-                            _, _, validId = fields
-                            self.updateReqId(int(validId))
-                            self._hasReqId = True
-                        elif msgId == 15:
-                            _, _, accts = fields
-                            self._accounts = [
-                                a for a in accts.split(',') if a]
-                    except (ValueError, IndexError):
-                        self._logger.warning(
-                            'Malformed pre-ready message: %s', fields)
-                    if self._hasReqId and self._accounts:
-                        self._apiReady = True
-                        self.apiStart.emit()
+                # snoop for nextValidId and managedAccounts response,
+                # when both are in then the client is ready
+                try:
+                    msgId = int(fields[0])
+                    if msgId == 9:
+                        _, _, validId = fields
+                        self.updateReqId(int(validId))
+                        self._hasReqId = True
+                    elif msgId == 15:
+                        _, _, accts = fields
+                        self._accounts = [
+                            a for a in accts.split(',') if a]
+                except (ValueError, IndexError):
+                    self._logger.warning(
+                        'Malformed pre-ready message: %s', fields)
+                if self._hasReqId and self._accounts:
+                    self._apiReady = True
+                    self.apiStart.emit()
 
                 # decode and handle the message
-                self.decoder.interpret(fields)
+                interpret(fields)
+
+            if self._data is not buf:
+                break
+
+        if self._data is buf:
+            if using_buf:
+                if pos:
+                    if pos == len(buf):
+                        buf.clear()
+                    else:
+                        del buf[:pos]
+            elif pos < buf_len:
+                buf.extend(data[pos:])
 
         if self._tcpDataProcessed:
             self._tcpDataProcessed()

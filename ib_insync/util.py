@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime as dt
+import functools
 import logging
 import math
 import os
@@ -33,15 +34,37 @@ _LEGACY_TZ_ALIASES = {
 }
 
 
+_ZONEINFO_CLS = ZoneInfo
+_ZONEINFO_CACHE: dict[str, ZoneInfo] = {}
+
+
 def getZoneInfo(key: str) -> ZoneInfo:
     """Resolve an IANA or legacy IB timezone name to a ZoneInfo instance."""
+    if ZoneInfo is _ZONEINFO_CLS:
+        tz = _ZONEINFO_CACHE.get(key)
+        if tz is not None:
+            return tz
     try:
-        return ZoneInfo(key)
+        tz = ZoneInfo(key)
     except ZoneInfoNotFoundError:
         alias = _LEGACY_TZ_ALIASES.get(key)
         if alias:
-            return ZoneInfo(alias)
-        raise
+            tz = ZoneInfo(alias)
+        else:
+            raise
+    if ZoneInfo is _ZONEINFO_CLS:
+        _ZONEINFO_CACHE[key] = tz
+    return tz
+
+
+@functools.lru_cache(maxsize=None)
+def _dataclass_field_names(cls: type[Any]) -> tuple[str, ...]:
+    return tuple(f.name for f in fields(cls))
+
+
+@functools.lru_cache(maxsize=None)
+def _dataclass_field_defaults(cls: type[Any]) -> tuple[tuple[str, Any], ...]:
+    return tuple((f.name, f.default) for f in fields(cls))
 
 
 globalErrorEvent = ev.Event()
@@ -70,7 +93,8 @@ def df(objs: Iterable[Any], labels: list[str] | None = None) -> Any:
         obj = objs[0]
         if is_dataclass(obj):
             df = pd.DataFrame.from_records(dataclassAsTuple(o) for o in objs)
-            df.columns = [field.name for field in fields(obj)]
+            df.columns = list(_dataclass_field_names(
+                obj if isinstance(obj, type) else type(obj)))
         elif isinstance(obj, DynamicObject):
             df = pd.DataFrame.from_records(o.__dict__ for o in objs)
         else:
@@ -95,7 +119,12 @@ def dataclassAsDict(obj: Any) -> dict[str, Any]:
     """
     if not is_dataclass(obj):
         raise TypeError(f'Object {obj} is not a dataclass')
-    return {field.name: getattr(obj, field.name) for field in fields(obj)}
+    cls = obj if isinstance(obj, type) else type(obj)
+    names = _dataclass_field_names(cls)
+    d = getattr(obj, '__dict__', None)
+    if d is not None and not isinstance(obj, type):
+        return {name: d[name] for name in names}
+    return {name: getattr(obj, name) for name in names}
 
 
 def dataclassAsTuple(obj: Any) -> tuple[Any, ...]:
@@ -105,7 +134,12 @@ def dataclassAsTuple(obj: Any) -> tuple[Any, ...]:
     """
     if not is_dataclass(obj):
         raise TypeError(f'Object {obj} is not a dataclass')
-    return tuple(getattr(obj, field.name) for field in fields(obj))
+    cls = obj if isinstance(obj, type) else type(obj)
+    names = _dataclass_field_names(cls)
+    d = getattr(obj, '__dict__', None)
+    if d is not None and not isinstance(obj, type):
+        return tuple(d[name] for name in names)
+    return tuple(getattr(obj, name) for name in names)
 
 
 def dataclassNonDefaults(obj: Any) -> dict[str, Any]:
@@ -115,12 +149,25 @@ def dataclassNonDefaults(obj: Any) -> dict[str, Any]:
     """
     if not is_dataclass(obj):
         raise TypeError(f'Object {obj} is not a dataclass')
-    values = [getattr(obj, field.name) for field in fields(obj)]
-    return {
-        field.name: value for field, value in zip(fields(obj), values)
-        if value != field.default
-        and value == value
-        and not (isinstance(value, list) and value == [])}
+    cls = obj if isinstance(obj, type) else type(obj)
+    field_defaults = _dataclass_field_defaults(cls)
+    d = getattr(obj, '__dict__', None)
+    result: dict[str, Any] = {}
+    if d is not None and not isinstance(obj, type):
+        for name, default in field_defaults:
+            value = d[name]
+            if (value != default
+                    and value == value
+                    and not (isinstance(value, list) and not value)):
+                result[name] = value
+    else:
+        for name, default in field_defaults:
+            value = getattr(obj, name)
+            if (value != default
+                    and value == value
+                    and not (isinstance(value, list) and not value)):
+                result[name] = value
+    return result
 
 
 def dataclassUpdate(obj: Any, *srcObjs: Any, **kwargs: Any) -> Any:
@@ -130,9 +177,18 @@ def dataclassUpdate(obj: Any, *srcObjs: Any, **kwargs: Any) -> Any:
     """
     if not is_dataclass(obj) or isinstance(obj, type):
         raise TypeError(f'Object {obj} is not a dataclass')
-    for srcObj in srcObjs:
-        obj.__dict__.update(dataclassAsDict(srcObj))
-    obj.__dict__.update(**kwargs)
+    d = getattr(obj, '__dict__', None)
+    if d is not None:
+        for srcObj in srcObjs:
+            d.update(dataclassAsDict(srcObj))
+        if kwargs:
+            d.update(kwargs)
+    else:
+        for srcObj in srcObjs:
+            for name, val in dataclassAsDict(srcObj).items():
+                setattr(obj, name, val)
+        for name, val in kwargs.items():
+            setattr(obj, name, val)
     return obj
 
 
@@ -596,6 +652,32 @@ def formatIBDatetime(t: dt.date | dt.datetime | str | None) -> str:
     return s
 
 
+_fromisoformat_dt = dt.datetime.fromisoformat
+_fromisoformat_date = dt.date.fromisoformat
+
+
+def _parse_ymdhms(
+        ss: str, tzinfo: dt.tzinfo | None = None) -> dt.datetime:
+    if (len(ss) == 16 and ss[10] == ':' and ss[13] == ':'
+            and ss[0:10].isascii() and ss[0:10].isdigit()):
+        t = _fromisoformat_dt(f'{ss[0:8]}T{ss[8:16]}')
+        return t.replace(tzinfo=tzinfo) if tzinfo is not None else t
+    t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+    return t.replace(tzinfo=tzinfo) if tzinfo is not None else t
+
+
+def _parse_date_time_parts(
+        date_s: str, time_s: str,
+        tzinfo: dt.tzinfo | None = None) -> dt.datetime:
+    if (len(date_s) == 8 and len(time_s) == 8
+            and time_s[2] == ':' and time_s[5] == ':'
+            and date_s.isascii() and date_s.isdigit()):
+        t = _fromisoformat_dt(f'{date_s} {time_s}')
+        return t.replace(tzinfo=tzinfo) if tzinfo is not None else t
+    ss = (date_s + time_s).replace('-', '')[:16]
+    return _parse_ymdhms(ss, tzinfo)
+
+
 def parseIBDatetime(s: str) -> dt.date | dt.datetime:
     """Parse string in IB date or datetime format to datetime."""
     if not isinstance(s, str):
@@ -605,34 +687,42 @@ def parseIBDatetime(s: str) -> dt.date | dt.datetime:
     if not cleaned:
         raise ValueError(f'Invalid IB datetime string: {s!r}')
     try:
-        if len(cleaned) == 8 and cleaned.isdigit():
+        n = len(cleaned)
+        if n == 8 and cleaned.isascii() and cleaned.isdigit():
             # YYYYmmdd
-            y = int(cleaned[0:4])
-            m = int(cleaned[4:6])
-            d = int(cleaned[6:8])
-            t: dt.date | dt.datetime = dt.date(y, m, d)
-        elif cleaned.isdigit():
-            t = dt.datetime.fromtimestamp(int(cleaned), dt.timezone.utc)
+            return _fromisoformat_date(cleaned)
+        if (n > 18 and cleaned[8] == ' ' and cleaned[11] == ':'
+                and cleaned[14] == ':' and cleaned[17] == ' '
+                and cleaned[18] != ' '
+                and cleaned[:8].isascii() and cleaned[:8].isdigit()):
+            # Fast path for most common IB bar format:
+            # 'YYYYmmdd HH:MM:SS <TZ>'
+            tz_key = cleaned[18:]
+            if ' ' not in tz_key:
+                return _fromisoformat_dt(cleaned[:17]).replace(
+                    tzinfo=getZoneInfo(tz_key))
+        if cleaned.isdigit():
+            t: dt.date | dt.datetime = dt.datetime.fromtimestamp(
+                int(cleaned), dt.timezone.utc)
         else:
             parts = cleaned.split()
-            if len(parts) == 3:
+            nparts = len(parts)
+            if nparts == 3:
                 # 20221125 10:00:00 Europe/Amsterdam
                 # or 20221125  10:00:00 Europe/Amsterdam
                 s0, s1, s2 = parts
-                ss = (s0 + s1).replace('-', '')[:16]
-                t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
-                t = t.replace(tzinfo=getZoneInfo(s2))
-            elif len(parts) == 2 and ':' in parts[0]:
+                t = _parse_date_time_parts(s0, s1, getZoneInfo(s2))
+            elif nparts == 2 and ':' in parts[0]:
                 # 20220101-10:30:00 US/Eastern
                 ss = parts[0].replace('-', '')[:16]
-                t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
-                t = t.replace(tzinfo=getZoneInfo(parts[1]))
+                t = _parse_ymdhms(ss, getZoneInfo(parts[1]))
+            elif nparts == 2:
+                # YYYYmmdd  HH:MM:SS or YYYY-mm-dd HH:MM:SS.0
+                t = _parse_date_time_parts(parts[0], parts[1])
             else:
-                # YYYYmmdd  HH:MM:SS
-                # or YYYYmmdd-HH:MM:SS
-                # or YYYY-mm-dd HH:MM:SS.0
+                # YYYYmmdd-HH:MM:SS
                 ss = cleaned.replace(' ', '').replace('-', '')[:16]
-                t = dt.datetime.strptime(ss, '%Y%m%d%H:%M:%S')
+                t = _parse_ymdhms(ss)
     except (ValueError, OverflowError, OSError) as err:
         raise ValueError(f'Invalid IB datetime string: {s!r}') from err
     return t

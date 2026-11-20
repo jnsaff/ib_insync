@@ -17,7 +17,7 @@ from ib_insync.util import dataclassRepr, isNan
 nan = float('nan')
 
 
-@dataclass
+@dataclass(eq=False)
 class Ticker:
     """
     Current market data such as bid, ask, last price, etc. for a contract.
@@ -118,12 +118,6 @@ class Ticker:
 
     def __post_init__(self) -> None:
         self.updateEvent = TickerUpdateEvent('updateEvent')
-
-    def __eq__(self, other: object) -> bool:
-        return self is other
-
-    def __hash__(self) -> int:
-        return id(self)
 
     __repr__ = dataclassRepr
     __str__ = dataclassRepr
@@ -247,7 +241,7 @@ class Midpoints(Tickfilter):
             self.emit(ticker.time, ticker.midpoint(), 0)
 
 
-@dataclass
+@dataclass(slots=True)
 class Bar:
     time: datetime | None
     open: float = nan
